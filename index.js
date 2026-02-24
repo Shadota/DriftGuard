@@ -32,6 +32,7 @@ const MODULE_NAME_FANCY = 'DriftGuard';
 const MODULE_VERSION = '0.3.0';
 const LOG_PREFIX = `[${MODULE_NAME_FANCY}]`;
 const MIN_SCORES_FOR_CORRECTION = 2;
+const MIN_SCORES_FOR_VERDICT = 2;
 
 // ==================== PROMPTS ====================
 
@@ -187,7 +188,7 @@ const DEFAULT_SETTINGS = {
     correction_enabled: true,
     correction_depth: 4,
     correction_max_traits: 3,
-    correction_patience: 3,
+    correction_patience: 2,
     correction_max_attempts: 2,
     correction_cooldown: 2,
     recovery_margin: 0.1,
@@ -1197,13 +1198,8 @@ globalThis.driftguard_intercept_generate = async function (chat, contextSize, ab
     const has_active_correction = state.active_correction?.enabled && state.active_correction?.injection_text;
 
     // Inject baseline Author's Note if enabled and available
-    // Suppress baseline when an active correction is present (correction subsumes baseline)
     if (get_settings('baseline_enabled') && state.baseline_text) {
-        if (has_active_correction) {
-            clear_baseline();
-        } else {
-            inject_baseline(state.baseline_text);
-        }
+        inject_baseline(state.baseline_text);
     }
 
     // Inject pre-computed correction if one is active
@@ -1361,7 +1357,12 @@ async function score_and_process_message(message_index, { force = false } = {}) 
 
             } else {
                 // === EXISTING CORRECTION: Check if working ===
-                correction.scores_since_correction++;
+                const corrected_trait_scored = correction.trait_ids.some(
+                    id => scores[id] !== undefined
+                );
+                if (corrected_trait_scored) {
+                    correction.scores_since_correction++;
+                }
                 const patience = get_settings('correction_patience');
                 const max_attempts = get_settings('correction_max_attempts');
 
@@ -1593,10 +1594,17 @@ function compute_card_resilience(score_history, traits, corrections_count) {
 
     // Time-to-drift: for each trait, messages until first drop below threshold
     const total_scored = score_history.length;
-    const drift_resistance = traits.map(t => {
-        const first_drift = score_history.findIndex(s => (s.scores[t.id] || 1) < threshold);
-        return first_drift === -1 ? 1.0 : first_drift / total_scored;
-    });
+    const scored_traits = traits.filter(t =>
+        score_history.some(s => s.scores[t.id] !== undefined)
+    );
+    const drift_resistance = scored_traits.length > 0
+        ? scored_traits.map(t => {
+            const first_drift = score_history.findIndex(s =>
+                s.scores[t.id] !== undefined && s.scores[t.id] < threshold
+            );
+            return first_drift === -1 ? 1.0 : first_drift / total_scored;
+        })
+        : [0.5];
 
     // Natural vs corrected: penalty if corrections were needed
     const correction_penalty = corrections_count > 0 ? 0.85 : 1.0;
@@ -1653,7 +1661,12 @@ function compute_trait_verdict(trait, score_history, drift_state, ceiling_traits
         return 'ceiling';
     }
 
-    const ever_drifted = score_history.some(s => (s.scores[trait.id] || 1) < threshold);
+    const actual_scores = score_history.filter(s => s.scores[trait.id] !== undefined);
+    if (actual_scores.length < MIN_SCORES_FOR_VERDICT) {
+        return 'insufficient_data';
+    }
+
+    const ever_drifted = actual_scores.some(s => s.scores[trait.id] < threshold);
 
     if (!ever_drifted) {
         return 'natural_fit';

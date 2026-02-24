@@ -516,6 +516,12 @@
     border: 1px solid rgba(156, 39, 176, 0.4);
 }
 
+.dc_verdict_insufficient_data {
+    background: rgba(158, 158, 158, 0.25);
+    color: #bdbdbd;
+    border: 1px solid rgba(158, 158, 158, 0.4);
+}
+
 /* ==================== INSIGHTS ==================== */
 .dc_insights_content {
     background: var(--black30a);
