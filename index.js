@@ -65,6 +65,12 @@ const SCORING_PROMPT = `Score this character response for adherence to each pers
 - 0.7 = Clearly present
 - 0.4 = Weakly present or inconsistent
 - 0.1 = Absent or contradicted
+- null = Not applicable to this scene (trait has no opportunity to manifest)
+
+IMPORTANT: Use null when a trait simply has no opportunity to appear in this response.
+A "romantic" trait during a combat scene, or an "aggressive" trait during a calm
+conversation, should be null -- NOT scored low. Only score 0.1 if the trait SHOULD
+be present given the scene but is absent or contradicted.
 
 Consider the conversation context when scoring. A trait may be situationally suppressed (e.g. a cold character showing brief vulnerability in an extreme situation) -- score based on whether the expression fits the character, not just keyword presence.
 
@@ -80,8 +86,8 @@ TRAITS TO SCORE:
 RESPONSE TO SCORE:
 {{response_text}}
 
-Respond with ONLY a JSON object mapping trait labels to scores. No other text.
-Example: {"Cold and calculating": 0.82, "Distrustful": 0.45}`;
+Respond with ONLY a JSON object mapping trait labels to scores (or null). No other text.
+Example: {"Cold and calculating": 0.82, "Distrustful": 0.45, "Romantic tenderness": null}`;
 
 const CORRECTION_GENERATION_PROMPT = `You are writing a brief Author's Note to steer a roleplay AI back toward a character's core traits. The note will be injected into the conversation context.
 
@@ -232,6 +238,9 @@ let EXTRACTION_IN_PROGRESS = false;
 let PLUGIN_AVAILABLE = null; // null = unknown, true = available, false = unavailable
 let PLUGIN_PROBE_TIMESTAMP = 0;
 const PLUGIN_PROBE_TTL_MS = 300000; // 5 minutes
+
+// Swipe re-score: message ID pending re-score after swipe
+let PENDING_SWIPE_RESCORE = null;
 
 // Popout state
 let POPOUT_VISIBLE = false;
@@ -858,6 +867,7 @@ async function score_response(response_text, traits, char_description, message_i
 
     // Map label-keyed scores from the LLM to stable trait IDs
     const id_scores = {};
+    const na_trait_ids = new Set();
     const raw_keys = Object.keys(raw_scores);
 
     for (const trait of traits) {
@@ -882,6 +892,11 @@ async function score_response(response_text, traits, char_description, message_i
             });
             if (sub_match) score = raw_scores[sub_match];
         }
+        // Handle null (N/A) scores -- trait not applicable to this scene
+        if (score === null) {
+            na_trait_ids.add(trait.id);
+            continue;
+        }
         if (score !== undefined) {
             const parsed = parseFloat(score);
             if (Number.isNaN(parsed)) {
@@ -892,10 +907,12 @@ async function score_response(response_text, traits, char_description, message_i
         }
     }
 
-    const unscored = traits.filter(t => id_scores[t.id] === undefined);
+    const unscored = traits.filter(t => id_scores[t.id] === undefined && !na_trait_ids.has(t.id));
     if (unscored.length > 0) {
         warn(`${unscored.length}/${traits.length} traits unscored: ${unscored.map(t => t.label).join(', ')}`);
     }
+    const scored_count = Object.keys(id_scores).length;
+    log(`${na_trait_ids.size} traits N/A, ${scored_count} traits scored`);
 
     return id_scores;
 }
@@ -1201,19 +1218,21 @@ globalThis.driftguard_intercept_generate = async function (chat, contextSize, ab
  * Main scoring and correction pipeline.
  * Called after each AI response is displayed (non-blocking).
  */
-async function on_message_received(message_index) {
-    if (!get_settings('enabled')) return;
-    if (SCORING_IN_PROGRESS) {
-        // Queue instead of dropping -- process after current scoring completes
-        if (!SCORING_QUEUE.includes(message_index)) {
-            SCORING_QUEUE.push(message_index);
-            log(`Scoring in progress, queued message #${message_index} (queue size: ${SCORING_QUEUE.length})`);
-        }
+/**
+ * Core scoring + post-processing pipeline.
+ * Scores a message, stores results, updates drift state, handles corrections.
+ * Used by on_message_received, Score Now button, and swipe re-score.
+ *
+ * @param {number} message_index - Chat message index to score
+ * @param {object} options
+ * @param {boolean} options.force - If true, bypass should_score_message() check
+ */
+async function score_and_process_message(message_index, { force = false } = {}) {
+    const state = get_chat_state();
+    if (!state.traits || state.traits.length === 0) {
+        if (force) toastr.warning('No traits extracted yet.', MODULE_NAME_FANCY);
         return;
     }
-
-    const state = get_chat_state();
-    if (!state.traits || state.traits.length === 0) return;
 
     // Clear ceiling if model has changed since ceiling was set
     if (state.ceiling_traits?.length > 0 && state.ceiling_model) {
@@ -1234,22 +1253,27 @@ async function on_message_received(message_index) {
 
     const chat = getContext().chat;
     const message = chat?.[message_index];
-    if (!message || message.is_user || message.is_system) return;
+    if (!message || message.is_user || message.is_system) {
+        if (force) toastr.warning('No valid AI message to score.', MODULE_NAME_FANCY);
+        return;
+    }
 
     // Skip greeting messages (card author's writing, not model output)
     if (is_greeting_message(message, message_index)) {
-        log(`Skipping greeting message #${message_index} (card author content)`);
+        if (force) toastr.warning('Cannot score the greeting message (card author content).', MODULE_NAME_FANCY);
+        else log(`Skipping greeting message #${message_index} (card author content)`);
         return;
     }
 
     // Skip OOC messages (not character behavior)
     if (is_ooc_message(message.mes)) {
-        log(`Skipping OOC message #${message_index}`);
+        if (force) toastr.warning('Cannot score an OOC message.', MODULE_NAME_FANCY);
+        else log(`Skipping OOC message #${message_index}`);
         return;
     }
 
-    // Check if this message should be scored
-    if (!should_score_message()) return;
+    // Check if this message should be scored (skip for forced/manual scoring)
+    if (!force && !should_score_message()) return;
 
     SCORING_IN_PROGRESS = true;
     try {
@@ -1258,6 +1282,7 @@ async function on_message_received(message_index) {
 
         if (Object.keys(scores).length === 0) {
             warn('Scoring returned empty results, skipping this cycle');
+            if (force) toastr.warning('Scoring returned empty results.', MODULE_NAME_FANCY);
             return;
         }
 
@@ -1526,7 +1551,7 @@ async function on_message_received(message_index) {
         save_chat_state(state);
     } catch (err) {
         error('Scoring/correction error:', err);
-        try { save_chat_state(state); } catch { /* ignore save errors in error handler */ }
+        try { save_chat_state(get_chat_state()); } catch { /* ignore save errors in error handler */ }
         toastr.warning(`Analysis error: ${err.message}. Scoring skipped.`, MODULE_NAME_FANCY);
     } finally {
         SCORING_IN_PROGRESS = false;
@@ -1535,10 +1560,22 @@ async function on_message_received(message_index) {
         if (SCORING_QUEUE.length > 0) {
             const next_index = SCORING_QUEUE.shift();
             log(`Processing queued message #${next_index} (${SCORING_QUEUE.length} remaining)`);
-            // Use setTimeout to avoid deep recursion
             setTimeout(() => on_message_received(next_index), 100);
         }
     }
+}
+
+async function on_message_received(message_index) {
+    if (!get_settings('enabled')) return;
+    if (SCORING_IN_PROGRESS) {
+        if (!SCORING_QUEUE.includes(message_index)) {
+            SCORING_QUEUE.push(message_index);
+            log(`Scoring in progress, queued message #${message_index} (queue size: ${SCORING_QUEUE.length})`);
+        }
+        return;
+    }
+
+    await score_and_process_message(message_index, { force: false });
 }
 
 // ==================== POST-ROLEPLAY REPORT ====================
@@ -2047,6 +2084,7 @@ function update_message_badges() {
 
         const threshold = get_settings('drift_threshold');
         for (const [trait_id, score] of Object.entries(dg.scores)) {
+            if (score === null || score === undefined) continue;
             const trait = state.traits.find(t => t.id === trait_id);
             const label = trait?.label || trait_id;
 
@@ -2542,6 +2580,109 @@ function add_popout_button() {
     });
 }
 
+// ==================== RETROACTIVE SCORING ====================
+
+/**
+ * Walk through chat history and score every Nth unscored AI message.
+ * Builds up score history for chats started without DriftGuard.
+ */
+async function score_chat_retroactively() {
+    const state = get_chat_state();
+    if (!state.traits || state.traits.length === 0) {
+        toastr.warning('No traits extracted. Extract traits first.', MODULE_NAME_FANCY);
+        return;
+    }
+
+    const chat = getContext().chat;
+    if (!chat || chat.length === 0) {
+        toastr.warning('No messages in chat.', MODULE_NAME_FANCY);
+        return;
+    }
+
+    if (SCORING_IN_PROGRESS) {
+        toastr.info('Scoring already in progress...', MODULE_NAME_FANCY);
+        return;
+    }
+
+    const freq = get_settings('score_frequency');
+    const char_desc = get_full_character_description();
+
+    // Collect every Nth AI message that hasn't been scored yet
+    const to_score = [];
+    let ai_count = 0;
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+
+        // Skip user/system messages
+        if (msg.is_user || msg.is_system) continue;
+
+        // Skip greeting messages
+        if (is_greeting_message(msg, i)) continue;
+
+        // Skip OOC messages
+        if (is_ooc_message(msg.mes)) continue;
+
+        ai_count++;
+
+        // Only score every Nth AI message (matching score_frequency)
+        if (ai_count % freq !== 0 && !(ai_count === 1 && get_settings('score_on_first'))) continue;
+
+        // Skip already-scored messages
+        if (msg.extra?.driftguard?.scored) continue;
+
+        to_score.push(i);
+    }
+
+    if (to_score.length === 0) {
+        toastr.info('No unscored messages to process.', MODULE_NAME_FANCY);
+        return;
+    }
+
+    log(`Retroactive scoring: ${to_score.length} messages to score`);
+    toastr.info(`Scoring ${to_score.length} messages...`, MODULE_NAME_FANCY);
+
+    SCORING_IN_PROGRESS = true;
+    let scored_count = 0;
+    try {
+        for (const msg_index of to_score) {
+            const msg = chat[msg_index];
+            if (!msg || !msg.mes) continue;
+
+            try {
+                const scores = await score_response(msg.mes, state.traits, char_desc, msg_index);
+
+                if (Object.keys(scores).length === 0) {
+                    warn(`Retroactive: empty scores for message #${msg_index}, skipping`);
+                    continue;
+                }
+
+                store_scores(msg, msg_index, scores);
+                state.messages_scored++;
+                scored_count++;
+
+                // Progress update every 5 messages
+                if (scored_count % 5 === 0) {
+                    toastr.info(`Scored ${scored_count}/${to_score.length} messages...`, MODULE_NAME_FANCY);
+                }
+            } catch (err) {
+                warn(`Retroactive: failed to score message #${msg_index}: ${err.message}`);
+            }
+        }
+
+        // Recompute drift state after all scoring
+        const drift = update_drift_state(state.traits, state.score_history);
+        save_drift_state(drift);
+        save_chat_state(state);
+        update_dashboard();
+        update_message_badges();
+
+        toastr.success(`Scored ${scored_count} messages`, MODULE_NAME_FANCY);
+        log(`Retroactive scoring complete: ${scored_count}/${to_score.length} messages scored`);
+    } finally {
+        SCORING_IN_PROGRESS = false;
+    }
+}
+
 // ==================== UI LISTENERS ====================
 
 function initialize_ui_listeners() {
@@ -2705,6 +2846,70 @@ function initialize_ui_listeners() {
 
         btn.removeClass('dc_disabled');
         btn.find('i').removeClass('fa-spinner fa-spin').addClass('fa-plug');
+    });
+
+    // Score Now: manually score the latest AI message
+    $(document).on('click', '#dc_btn_score_now', async function () {
+        const btn = $(this);
+        if (SCORING_IN_PROGRESS) {
+            toastr.info('Scoring already in progress...', MODULE_NAME_FANCY);
+            return;
+        }
+
+        btn.addClass('dc_disabled');
+        btn.find('i').removeClass('fa-bullseye').addClass('fa-spinner fa-spin');
+
+        try {
+            // Find the last AI message
+            const chat = getContext().chat;
+            if (!chat || chat.length === 0) {
+                toastr.warning('No messages in chat.', MODULE_NAME_FANCY);
+                return;
+            }
+
+            let target_index = -1;
+            for (let i = chat.length - 1; i >= 0; i--) {
+                if (!chat[i].is_user && !chat[i].is_system) {
+                    target_index = i;
+                    break;
+                }
+            }
+
+            if (target_index === -1) {
+                toastr.warning('No AI message found to score.', MODULE_NAME_FANCY);
+                return;
+            }
+
+            toastr.info('Scoring message...', MODULE_NAME_FANCY);
+            await score_and_process_message(target_index, { force: true });
+            toastr.success('Message scored', MODULE_NAME_FANCY);
+        } catch (err) {
+            toastr.error(`Scoring failed: ${err.message}`, MODULE_NAME_FANCY);
+        } finally {
+            btn.removeClass('dc_disabled');
+            btn.find('i').removeClass('fa-spinner fa-spin').addClass('fa-bullseye');
+        }
+    });
+
+    // Score Chat: retroactively score all unscored AI messages
+    $(document).on('click', '#dc_btn_score_chat', async function () {
+        const btn = $(this);
+        if (SCORING_IN_PROGRESS) {
+            toastr.info('Scoring already in progress...', MODULE_NAME_FANCY);
+            return;
+        }
+
+        btn.addClass('dc_disabled');
+        btn.find('i').removeClass('fa-backward').addClass('fa-spinner fa-spin');
+
+        try {
+            await score_chat_retroactively();
+        } catch (err) {
+            toastr.error(`Retroactive scoring failed: ${err.message}`, MODULE_NAME_FANCY);
+        } finally {
+            btn.removeClass('dc_disabled');
+            btn.find('i').removeClass('fa-spinner fa-spin').addClass('fa-backward');
+        }
     });
 
     $(document).on('click', '#dc_btn_reextract', async function () {
@@ -3008,13 +3213,21 @@ function register_event_listeners() {
         update_message_badges();
     });
 
-    // Message received: scoring pipeline
+    // Message received: scoring pipeline + swipe re-score
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (id) => {
-        // Delay to avoid interfering with streaming
+        // Check if this is a swipe re-score (previously scored message was swiped)
+        if (PENDING_SWIPE_RESCORE !== null && PENDING_SWIPE_RESCORE === id) {
+            PENDING_SWIPE_RESCORE = null;
+            log(`Swipe re-score triggered for message #${id}`);
+            setTimeout(() => score_and_process_message(id, { force: true }), 500);
+            return;
+        }
+
+        // Normal auto-scoring pipeline
         setTimeout(() => on_message_received(id), 500);
     });
 
-    // Message swiped: discard old score for the swiped message
+    // Message swiped: discard old score and flag for re-score
     eventSource.on(event_types.MESSAGE_SWIPED, (data) => {
         const state = get_chat_state();
         if (!state.score_history?.length) return;
@@ -3025,8 +3238,18 @@ function register_event_listeners() {
         // Remove score for this message from history
         const before = state.score_history.length;
         state.score_history = state.score_history.filter(s => s.message_id !== message_id);
-        if (state.score_history.length < before) {
+        const was_scored = state.score_history.length < before;
+
+        if (was_scored) {
             log(`Discarded score for swiped message #${message_id}`);
+
+            // Also clear per-message badge data so the old badges don't linger
+            const chat = getContext().chat;
+            const message = chat?.[message_id];
+            if (message?.extra?.driftguard) {
+                delete message.extra.driftguard;
+            }
+
             // Recompute drift state
             if (CURRENT_TRAITS.length > 0) {
                 CURRENT_DRIFT_STATE = update_drift_state(CURRENT_TRAITS, state.score_history);
@@ -3034,6 +3257,10 @@ function register_event_listeners() {
             }
             save_chat_state(state);
             update_dashboard();
+
+            // Flag this message for re-scoring when the new swipe renders
+            PENDING_SWIPE_RESCORE = message_id;
+            log(`Flagged message #${message_id} for swipe re-score`);
         }
     });
 }
