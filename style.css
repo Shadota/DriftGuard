@@ -993,3 +993,186 @@
     width: 100%;
     margin-top: 5px;
 }
+
+/* ==================== POPOUT WINDOW ==================== */
+#dc_popout {
+    position: fixed;
+    top: var(--topBarBlockSize, 50px);
+    right: 10px;
+    width: 570px;
+    min-width: 400px;
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vh - var(--topBarBlockSize, 50px) - 20px);
+    overflow: hidden;
+    background-color: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    z-index: 10000;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    resize: horizontal;
+}
+
+/* Popout control bar (header) */
+#dc_popout .panelControlBar {
+    padding: 10px 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    font-weight: 500;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    background: var(--SmartThemeBlurTintColor);
+    cursor: grab;
+    z-index: 1;
+}
+
+#dc_popout .panelControlBar:active {
+    cursor: grabbing;
+}
+
+#dc_popout .panelControlBar .title {
+    font-size: 1em;
+    font-weight: bold;
+}
+
+#dc_popout .panelControlBar .flex1 {
+    flex: 1;
+}
+
+/* Drag grabber icon */
+#dc_popout .drag-grabber {
+    cursor: grab;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease;
+}
+
+#dc_popout .drag-grabber:hover {
+    opacity: 1;
+}
+
+#dc_popout .drag-grabber:active {
+    cursor: grabbing;
+}
+
+/* Hover glow effect */
+#dc_popout .hoverglow:hover {
+    filter: brightness(1.2);
+}
+
+/* Content container */
+#dc_popout_content_container {
+    padding: 0;
+    max-height: calc(100vh - var(--topBarBlockSize, 50px) - 80px);
+    overflow: auto;
+}
+
+#dc_popout_content_container .inline-drawer-content {
+    padding: 15px;
+}
+
+/* ==================== POPOUT TOGGLE BUTTON ==================== */
+#dc_popout_button {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#dc_popout_button:hover {
+    opacity: 1;
+}
+
+#dc_popout_button.active {
+    color: #90caf9;
+    opacity: 1;
+}
+
+/* ==================== RESPONSIVE POPOUT ==================== */
+@media screen and (max-width: 500px) {
+    #dc_popout {
+        width: calc(100vw - 20px);
+        right: 10px;
+        left: 10px;
+    }
+}
+
+@media screen and (max-height: 600px) {
+    #dc_popout {
+        max-height: calc(100vh - var(--topBarBlockSize, 50px) - 10px);
+    }
+
+    #dc_popout_content_container {
+        max-height: calc(100vh - var(--topBarBlockSize, 50px) - 60px);
+    }
+}
+
+/* ==================== POPOUT TABS COMPACT ==================== */
+#dc_popout .dc_tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    justify-content: center;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+
+#dc_popout .dc_tabs::-webkit-scrollbar {
+    display: none;
+}
+
+/* In popout: hide tab text, show only icons */
+#dc_popout .dc_tab {
+    padding: 10px 14px;
+    font-size: 0;
+    white-space: nowrap;
+}
+
+#dc_popout .dc_tab i {
+    font-size: 1.1rem;
+    margin-right: 0;
+}
+
+/* ==================== POPOUT BUTTON ICON SPACING ==================== */
+#dc_popout .menu_button i,
+#dc_popout .dc_button_row .menu_button i {
+    margin-right: 0.5em;
+}
+
+/* ==================== POPOUT LOCK BUTTON ==================== */
+#dc_popout .dragLock {
+    cursor: pointer;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#dc_popout .dragLock:hover {
+    opacity: 1;
+}
+
+#dc_popout .dragLock.locked {
+    color: #4caf50;
+    opacity: 1;
+}
+
+#dc_popout.position-locked .panelControlBar {
+    cursor: default;
+}
+
+#dc_popout.position-locked .drag-grabber {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+/* ==================== POPOUT RESET SIZE BUTTON ==================== */
+#dc_popout .dragReset {
+    cursor: pointer;
+    padding: 5px 10px;
+    opacity: 0.6;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+#dc_popout .dragReset:hover {
+    opacity: 1;
+    color: #90caf9;
+}

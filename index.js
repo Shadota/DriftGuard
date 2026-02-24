@@ -233,6 +233,12 @@ let PLUGIN_AVAILABLE = null; // null = unknown, true = available, false = unavai
 let PLUGIN_PROBE_TIMESTAMP = 0;
 const PLUGIN_PROBE_TTL_MS = 300000; // 5 minutes
 
+// Popout state
+let POPOUT_VISIBLE = false;
+let POPOUT_LOCKED = false;
+let $POPOUT = null;
+let $DRAWER_CONTENT = null;
+
 // ==================== UTILITY HELPERS ====================
 
 function log(...args) {
@@ -2197,6 +2203,345 @@ function compare_reports() {
     result_el.style.display = '';
 }
 
+// ==================== POPOUT FUNCTIONS ====================
+
+function isPopoutVisible() {
+    return POPOUT_VISIBLE;
+}
+
+function togglePopout() {
+    if (POPOUT_VISIBLE) {
+        closePopout();
+    } else {
+        openPopout();
+    }
+}
+
+function openPopout() {
+    if (POPOUT_VISIBLE) return;
+
+    const $drawer = $('#driftguard_settings');
+    const $drawerHeader = $drawer.find('.inline-drawer-header');
+    const $drawerContentElement = $drawer.find('.inline-drawer-content');
+    const isCollapsed = !$drawerContentElement.hasClass('open');
+
+    // If collapsed, trigger click to open first
+    if (isCollapsed) {
+        $drawerHeader.trigger('click');
+    }
+
+    // Create the popout element
+    $POPOUT = $(`
+        <div id="dc_popout" class="draggable" style="display: none;">
+            <div class="panelControlBar flex-container" id="dcPopoutHeader">
+                <div class="title">${MODULE_NAME_FANCY}</div>
+                <div class="flex1"></div>
+                <div class="fa-solid fa-arrows-left-right hoverglow dragReset" title="Reset to default size"></div>
+                <div class="fa-solid fa-grip drag-grabber hoverglow" title="Drag to move"></div>
+                <div class="fa-solid fa-lock-open hoverglow dragLock" title="Lock position"></div>
+            </div>
+            <div id="dc_popout_content_container"></div>
+        </div>
+    `);
+
+    // Append popout to body
+    $('body').append($POPOUT);
+
+    // Move drawer content to popout
+    $drawerContentElement.detach().appendTo($POPOUT.find('#dc_popout_content_container'));
+    $drawerContentElement.addClass('open').show();
+    $DRAWER_CONTENT = $drawerContentElement;
+
+    // Set up dragging using SillyTavern's dragElement if available
+    try {
+        const ctx = getContext();
+        if (typeof ctx.dragElement === 'function') {
+            ctx.dragElement($POPOUT);
+        } else if (typeof window.dragElement === 'function') {
+            window.dragElement($POPOUT);
+        } else {
+            make_popout_draggable($POPOUT);
+        }
+    } catch (e) {
+        make_popout_draggable($POPOUT);
+    }
+
+    // Load saved position if available
+    load_popout_position();
+
+    // Set up button handlers
+    $POPOUT.find('.dragLock').on('click', () => togglePopoutLock());
+    $POPOUT.find('.dragReset').on('click', () => resetPopoutSize());
+
+    // Set up ResizeObserver to track when user manually resizes
+    try {
+        const resizeObserver = new ResizeObserver(debounce((entries) => {
+            for (const entry of entries) {
+                $POPOUT.data('user-resized', true);
+                save_popout_position();
+            }
+        }, 250));
+        resizeObserver.observe($POPOUT[0]);
+        $POPOUT.data('resize-observer', resizeObserver);
+    } catch (e) {
+        // ResizeObserver not available
+    }
+
+    // Show the popout with animation
+    $POPOUT.fadeIn(250);
+
+    // Update state
+    POPOUT_VISIBLE = true;
+    update_popout_button_state();
+
+    log('Popout opened');
+}
+
+function closePopout() {
+    if (!POPOUT_VISIBLE || !$POPOUT) return;
+
+    const $currentPopout = $POPOUT;
+    const $currentDrawerContent = $DRAWER_CONTENT;
+
+    // Save position before closing
+    save_popout_position();
+
+    // Cleanup ResizeObserver
+    const resizeObserver = $currentPopout.data('resize-observer');
+    if (resizeObserver) {
+        resizeObserver.disconnect();
+    }
+
+    $currentPopout.fadeOut(250, () => {
+        const $drawer = $('#driftguard_settings');
+        const $inlineDrawer = $drawer.find('.inline-drawer');
+
+        if ($currentDrawerContent) {
+            // Move content back to drawer
+            $currentDrawerContent.detach().appendTo($inlineDrawer);
+            $currentDrawerContent.addClass('open').show();
+        }
+
+        // Remove popout element
+        $currentPopout.remove();
+
+        if ($POPOUT === $currentPopout) {
+            $POPOUT = null;
+        }
+    });
+
+    // Update state
+    POPOUT_VISIBLE = false;
+    $DRAWER_CONTENT = null;
+    update_popout_button_state();
+
+    log('Popout closed');
+}
+
+function togglePopoutLock() {
+    if (!$POPOUT) return;
+
+    POPOUT_LOCKED = !POPOUT_LOCKED;
+    update_lock_button_ui();
+    save_popout_position();
+
+    log(`Popout position ${POPOUT_LOCKED ? 'locked' : 'unlocked'}`);
+}
+
+function update_lock_button_ui() {
+    if (!$POPOUT) return;
+
+    const $button = $POPOUT.find('.dragLock');
+
+    if (POPOUT_LOCKED) {
+        $button.removeClass('fa-lock-open').addClass('fa-lock locked');
+        $button.attr('title', 'Unlock position');
+        $POPOUT.addClass('position-locked');
+    } else {
+        $button.removeClass('fa-lock locked').addClass('fa-lock-open');
+        $button.attr('title', 'Lock position');
+        $POPOUT.removeClass('position-locked');
+    }
+}
+
+function make_popout_draggable($element) {
+    const $header = $element.find('#dcPopoutHeader');
+    let isDragging = false;
+    let startX, startY, initialX, initialY;
+
+    $header.on('mousedown', (e) => {
+        if (POPOUT_LOCKED) return;
+
+        // Don't drag if clicking on interactive elements
+        if ($(e.target).hasClass('dragClose') || $(e.target).hasClass('dragLock') || $(e.target).hasClass('hoverglow')) {
+            return;
+        }
+
+        isDragging = true;
+        startX = e.clientX;
+        startY = e.clientY;
+
+        const rect = $element[0].getBoundingClientRect();
+        initialX = rect.left;
+        initialY = rect.top;
+
+        $header.css('cursor', 'grabbing');
+        e.preventDefault();
+    });
+
+    $(document).on('mousemove.dcPopout', (e) => {
+        if (!isDragging) return;
+
+        const deltaX = e.clientX - startX;
+        const deltaY = e.clientY - startY;
+
+        let newX = initialX + deltaX;
+        let newY = initialY + deltaY;
+
+        // Keep within viewport bounds
+        const maxX = window.innerWidth - $element.outerWidth();
+        const maxY = window.innerHeight - $element.outerHeight();
+
+        newX = Math.max(0, Math.min(newX, maxX));
+        newY = Math.max(0, Math.min(newY, maxY));
+
+        $element.css({
+            left: newX + 'px',
+            top: newY + 'px',
+            right: 'auto',
+            bottom: 'auto',
+        });
+    });
+
+    $(document).on('mouseup.dcPopout', () => {
+        if (isDragging) {
+            isDragging = false;
+            $header.css('cursor', 'grab');
+            save_popout_position();
+        }
+    });
+}
+
+function save_popout_position() {
+    if (!$POPOUT) return;
+
+    const position = {
+        left: $POPOUT.css('left'),
+        top: $POPOUT.css('top'),
+        right: $POPOUT.css('right'),
+        width: $POPOUT.data('user-resized') ? $POPOUT.css('width') : null,
+        locked: POPOUT_LOCKED,
+    };
+
+    localStorage.setItem('dc_popout_position', JSON.stringify(position));
+}
+
+function load_popout_position() {
+    if (!$POPOUT) return;
+
+    const saved = localStorage.getItem('dc_popout_position');
+
+    if (saved) {
+        try {
+            const position = JSON.parse(saved);
+            $POPOUT.css({
+                left: position.left || 'auto',
+                top: position.top || 'var(--topBarBlockSize, 50px)',
+                right: position.right || 'auto',
+            });
+
+            if (position.width) {
+                $POPOUT.css('width', position.width);
+                $POPOUT.data('user-resized', true);
+            }
+
+            if (position.locked !== undefined) {
+                POPOUT_LOCKED = position.locked;
+                update_lock_button_ui();
+            }
+        } catch (e) {
+            warn('Failed to load popout position:', e);
+        }
+    }
+}
+
+function resetPopoutSize() {
+    if (!$POPOUT) return;
+
+    $POPOUT.css('width', '');
+    $POPOUT.data('user-resized', false);
+    save_popout_position();
+
+    log('Popout size reset to default');
+}
+
+function update_popout_button_state() {
+    const $button = $('#dc_popout_button');
+    if ($button.length === 0) return;
+
+    if (POPOUT_VISIBLE) {
+        $button.addClass('active');
+        $button.attr('title', 'Close floating window');
+    } else {
+        $button.removeClass('active');
+        $button.attr('title', 'Pop out settings to a floating window');
+    }
+}
+
+function add_popout_button() {
+    const $header = $('#driftguard_settings .inline-drawer-header');
+    if ($header.length === 0) {
+        warn('Popout button: Header not found');
+        return;
+    }
+
+    // Don't add if already exists
+    if ($('#dc_popout_button').length > 0) return;
+
+    // Create the popout button
+    const $button = $(`
+        <i id="dc_popout_button"
+           class="fa-solid fa-window-restore menu_button margin0 interactable"
+           tabindex="0"
+           title="Pop out settings to a floating window">
+        </i>
+    `);
+
+    // Style the button
+    $button.css({
+        'margin-left': 'auto',
+        'margin-right': '10px',
+        'display': 'inline-flex',
+        'vertical-align': 'middle',
+        'cursor': 'pointer',
+        'font-size': '1em',
+    });
+
+    // Click handler with stopPropagation to prevent drawer toggle
+    $button.on('click', (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        togglePopout();
+    });
+
+    // Insert button before the chevron icon
+    const $chevron = $header.find('.inline-drawer-icon');
+    if ($chevron.length > 0) {
+        $button.insertBefore($chevron);
+    } else {
+        $header.append($button);
+    }
+
+    // Intercept drawer header clicks when popout is visible
+    $header.on('click.dcPopout', function (event) {
+        if (POPOUT_VISIBLE) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            closePopout();
+        }
+    });
+}
+
 // ==================== UI LISTENERS ====================
 
 function initialize_ui_listeners() {
@@ -2502,6 +2847,9 @@ function initialize_ui_listeners() {
             toggle.find('span').text('Hide injected text');
         }
     });
+
+    // Popout feature
+    add_popout_button();
 }
 
 /**
