@@ -1,0 +1,12 @@
+{
+    "display_name": "DriftGuard",
+    "loading_order": 101,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Shadota",
+    "version": "0.3.0",
+    "homePage": "https://github.com/Shadota/DriftGuard",
+    "generate_interceptor": "driftguard_intercept_generate"
+}

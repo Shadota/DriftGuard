@@ -1,0 +1,11 @@
+{
+    "name": "driftguard",
+    "version": "0.1.0",
+    "description": "DriftGuard server plugin -- Claude Code CLI bridge for character drift analysis",
+    "main": "index.js",
+    "author": "Shadota",
+    "license": "MIT",
+    "dependencies": {
+        "body-parser": "^1.20.2"
+    }
+}

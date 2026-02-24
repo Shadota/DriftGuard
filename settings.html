@@ -1,0 +1,559 @@
+<div id="driftguard_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>DriftGuard</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <!-- Tab Navigation -->
+            <div class="dc_tabs">
+                <button class="dc_tab dc_tab_active" data-tab="overview">
+                    <i class="fa-solid fa-shield-halved"></i> Overview
+                </button>
+                <button class="dc_tab" data-tab="report">
+                    <i class="fa-solid fa-file-lines"></i> Report
+                </button>
+                <button class="dc_tab" data-tab="settings">
+                    <i class="fa-solid fa-gear"></i> Settings
+                </button>
+            </div>
+
+            <!-- ==================== OVERVIEW TAB ==================== -->
+            <div class="dc_tab_content dc_tab_content_active" data-tab="overview">
+
+                <!-- Status Bar -->
+                <div class="dc_overview_section">
+                    <div class="dc_status_panel">
+                        <table class="dc_status_table">
+                            <tr>
+                                <td>Status</td>
+                                <td><span id="dc_status_text">Inactive</span></td>
+                            </tr>
+                            <tr>
+                                <td>Backend</td>
+                                <td><span id="dc_backend_status">Not configured</span></td>
+                            </tr>
+                            <tr>
+                                <td>Messages scored</td>
+                                <td><span id="dc_messages_scored">0</span></td>
+                            </tr>
+                            <tr>
+                                <td>Corrections injected</td>
+                                <td><span id="dc_corrections_count">0</span></td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Trait Health -->
+                <div class="dc_overview_section">
+                    <h4><i class="fa-solid fa-heartbeat"></i> Trait Health</h4>
+                    <div id="dc_trait_health_container">
+                        <div class="dc_empty_state">
+                            <i class="fa-solid fa-user-slash"></i>
+                            <span>No character loaded. Open a chat to begin tracking.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Active Correction -->
+                <div class="dc_overview_section" id="dc_correction_section" style="display: none;">
+                    <h4><i class="fa-solid fa-wand-magic-sparkles"></i> Active Correction</h4>
+                    <div class="dc_correction_panel">
+                        <div class="dc_correction_info">
+                            <div class="dc_stat_row">
+                                <span class="dc_stat_label">Reinforcing</span>
+                                <span id="dc_correction_traits" class="dc_stat_value">--</span>
+                            </div>
+                            <div class="dc_stat_row">
+                                <span class="dc_stat_label">Attempt</span>
+                                <span id="dc_correction_attempt" class="dc_stat_value">--</span>
+                            </div>
+                            <div class="dc_stat_row">
+                                <span class="dc_stat_label">Depth</span>
+                                <span id="dc_correction_depth" class="dc_stat_value">--</span>
+                            </div>
+                            <div class="dc_stat_row">
+                                <span class="dc_stat_label">Since message</span>
+                                <span id="dc_correction_since" class="dc_stat_value">--</span>
+                            </div>
+                        </div>
+                        <div class="dc_correction_text_toggle" id="dc_correction_toggle">
+                            <span>Show injected text</span>
+                            <i class="fa-solid fa-chevron-down"></i>
+                        </div>
+                        <div class="dc_correction_text_content" id="dc_correction_text" style="display: none;">
+                            <pre id="dc_correction_text_body">--</pre>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Ceiling Traits Warning -->
+                <div class="dc_overview_section" id="dc_ceiling_section" style="display: none;">
+                    <div class="dc_status_message dc_status_warning">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <span id="dc_ceiling_text">--</span>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="dc_overview_section">
+                    <div class="dc_button_row">
+                        <div id="dc_btn_reextract" class="menu_button" title="Re-analyze the character card and extract personality traits">
+                            <i class="fa-solid fa-rotate"></i> Re-extract Traits
+                        </div>
+                        <div id="dc_btn_clear_corrections" class="menu_button" title="Remove the current Author's Note injection">
+                            <i class="fa-solid fa-eraser"></i> Clear Corrections
+                        </div>
+                        <div id="dc_btn_clear_scores" class="menu_button menu_button_danger" title="Delete all score history for this chat">
+                            <i class="fa-solid fa-trash"></i> Clear Scores
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ==================== REPORT TAB ==================== -->
+            <div class="dc_tab_content" data-tab="report">
+
+                <!-- Generate Button -->
+                <div class="dc_overview_section">
+                    <div class="dc_button_row">
+                        <div id="dc_btn_generate_report" class="menu_button" title="Generate a post-roleplay analysis report">
+                            <i class="fa-solid fa-chart-line"></i> Generate Report
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Report Content (hidden until generated) -->
+                <div id="dc_report_content" style="display: none;">
+
+                    <!-- Session Scores -->
+                    <div class="dc_overview_section">
+                        <h4><i class="fa-solid fa-star"></i> Session Scores</h4>
+                        <div class="dc_report_scores">
+                            <div class="dc_score_bar_row">
+                                <span class="dc_score_label">Card Resilience</span>
+                                <div class="dc_score_bar_container">
+                                    <div id="dc_report_card_bar" class="dc_score_bar_fill" style="width: 0%"></div>
+                                </div>
+                                <span id="dc_report_card_score" class="dc_score_value">--</span>
+                            </div>
+                            <div class="dc_score_bar_row">
+                                <span class="dc_score_label">Session Quality</span>
+                                <div class="dc_score_bar_container">
+                                    <div id="dc_report_session_bar" class="dc_score_bar_fill" style="width: 0%"></div>
+                                </div>
+                                <span id="dc_report_session_score" class="dc_score_value">--</span>
+                            </div>
+                            <div class="dc_score_bar_row">
+                                <span class="dc_score_label">Model Compatibility</span>
+                                <div class="dc_score_bar_container">
+                                    <div id="dc_report_model_bar" class="dc_score_bar_fill" style="width: 0%"></div>
+                                </div>
+                                <span id="dc_report_model_score" class="dc_score_value">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Trait Verdicts -->
+                    <div class="dc_overview_section">
+                        <h4><i class="fa-solid fa-gavel"></i> Trait Verdicts</h4>
+                        <div id="dc_report_verdicts"></div>
+                    </div>
+
+                    <!-- Insights -->
+                    <div class="dc_overview_section">
+                        <h4><i class="fa-solid fa-lightbulb"></i> Insights</h4>
+                        <div id="dc_report_insights" class="dc_insights_content">
+                            <span class="dc_empty_state">Generate a report to see insights.</span>
+                        </div>
+                    </div>
+
+                    <!-- Compare -->
+                    <div class="dc_overview_section">
+                        <h4><i class="fa-solid fa-code-compare"></i> Compare Reports</h4>
+                        <div id="dc_report_index_list" class="dc_report_index">
+                            <span class="dc_empty_state">No previous reports found.</span>
+                        </div>
+                        <div class="dc_button_row" style="margin-top: 8px;">
+                            <div id="dc_btn_compare" class="menu_button" title="Compare two selected reports">
+                                <i class="fa-solid fa-code-compare"></i> Compare Selected
+                            </div>
+                        </div>
+                        <div id="dc_comparison_result" style="display: none;"></div>
+                    </div>
+
+                    <!-- Export -->
+                    <div class="dc_overview_section">
+                        <div class="dc_button_row">
+                            <div id="dc_btn_export_report" class="menu_button" title="Export this report as JSON">
+                                <i class="fa-solid fa-download"></i> Export Report
+                            </div>
+                            <div id="dc_btn_export_all" class="menu_button" title="Export all reports as a single JSON file">
+                                <i class="fa-solid fa-file-export"></i> Export All Reports
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ==================== SETTINGS TAB ==================== -->
+            <div class="dc_tab_content" data-tab="settings">
+
+                <!-- Master Switch -->
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_enabled" />
+                    <label for="dc_enabled">Enable DriftGuard</label>
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Analysis Backend -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-server"></i> Analysis Backend
+                </div>
+
+                <div class="dc_info_box">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>The analysis backend is separate from your roleplay model. DriftGuard uses it to judge character responses for trait adherence.</span>
+                </div>
+
+                <div class="dc_compact_setting" style="margin-bottom: 10px;">
+                    <div class="dc_radio_group">
+                        <label class="dc_radio_option">
+                            <input type="radio" name="dc_analysis_backend" value="claude_code" id="dc_backend_claude" />
+                            <span>Claude Code</span>
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Uses the Claude CLI via the DriftGuard server plugin. Requires the plugin installed in SillyTavern's plugins/ directory.</span>
+                            </span>
+                        </label>
+                        <label class="dc_radio_option">
+                            <input type="radio" name="dc_analysis_backend" value="openai" id="dc_backend_openai" />
+                            <span>OpenAI-Compatible</span>
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Any OpenAI-compatible endpoint: local models (llama.cpp, TabbyAPI, Ollama), OpenAI, OpenRouter, etc.</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Claude Code Backend Settings -->
+                <div id="dc_claude_settings" class="dc_backend_panel">
+                    <div class="dc_compact_input">
+                        <label for="dc_claude_model">
+                            Model
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Claude model to use for analysis. Options: sonnet, haiku, opus, or a full model ID.</span>
+                            </span>
+                        </label>
+                        <input type="text" id="dc_claude_model" placeholder="sonnet" />
+                    </div>
+                    <div class="dc_stat_row">
+                        <span class="dc_stat_label">Plugin status</span>
+                        <span id="dc_plugin_status" class="dc_stat_value">
+                            <span class="dc_connection_indicator unknown"></span> Unknown
+                        </span>
+                    </div>
+                </div>
+
+                <!-- OpenAI Backend Settings -->
+                <div id="dc_openai_settings" class="dc_backend_panel" style="display: none;">
+                    <div class="dc_compact_input">
+                        <label for="dc_openai_endpoint">
+                            Endpoint URL
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Base URL of the OpenAI-compatible API (e.g., http://localhost:5000/v1 or https://api.openai.com/v1)</span>
+                            </span>
+                        </label>
+                        <input type="text" id="dc_openai_endpoint" placeholder="http://localhost:5000/v1" />
+                    </div>
+                    <div class="dc_compact_input">
+                        <label for="dc_openai_api_key">
+                            API Key
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">API key for authentication. Leave empty for local servers that don't require one.</span>
+                            </span>
+                        </label>
+                        <input type="password" id="dc_openai_api_key" placeholder="sk-..." />
+                    </div>
+                    <div class="dc_compact_input">
+                        <label for="dc_openai_model">
+                            Model
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Model name to send in requests. Leave empty for local servers that ignore this field.</span>
+                            </span>
+                        </label>
+                        <input type="text" id="dc_openai_model" placeholder="gpt-4o-mini" />
+                    </div>
+                </div>
+
+                <div class="dc_button_row">
+                    <div id="dc_btn_test_connection" class="menu_button" title="Test the configured analysis backend">
+                        <i class="fa-solid fa-plug"></i> Test Connection
+                    </div>
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Scoring -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-chart-simple"></i> Scoring
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Score every N messages
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">How often to score AI responses. 1 = every response, 3 = every 3rd response. Higher values reduce API costs.</span>
+                            </span>
+                        </span>
+                        <span id="dc_score_frequency_value" class="dc_setting_value">3</span>
+                    </div>
+                    <input type="range" id="dc_score_frequency" class="dc_compact_slider" min="1" max="10" step="1" value="3" />
+                </div>
+
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_score_on_first" />
+                    <label for="dc_score_on_first">Always score first response</label>
+                    <span class="dc_tooltip">
+                        <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                        <span class="dc_tooltip_text">Always score the very first AI response in a chat, regardless of frequency setting.</span>
+                    </span>
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Drift Detection -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-magnifying-glass-chart"></i> Drift Detection
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Moving average window
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Number of recent scored messages to include in the moving average calculation.</span>
+                            </span>
+                        </span>
+                        <span id="dc_drift_window_value" class="dc_setting_value">8</span>
+                    </div>
+                    <input type="range" id="dc_drift_window" class="dc_compact_slider" min="3" max="15" step="1" value="8" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Drift threshold
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Trait scores below this value trigger drift correction. Lower = more tolerant. Range: 0.0-1.0.</span>
+                            </span>
+                        </span>
+                        <span id="dc_drift_threshold_value" class="dc_setting_value">0.40</span>
+                    </div>
+                    <input type="range" id="dc_drift_threshold" class="dc_compact_slider" min="0.1" max="0.8" step="0.05" value="0.4" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Alert threshold
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Scores below this trigger a severe drift alert with more aggressive correction. Must be lower than drift threshold.</span>
+                            </span>
+                        </span>
+                        <span id="dc_drift_alert_threshold_value" class="dc_setting_value">0.25</span>
+                    </div>
+                    <input type="range" id="dc_drift_alert_threshold" class="dc_compact_slider" min="0.05" max="0.5" step="0.05" value="0.25" />
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Correction -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> Correction
+                </div>
+
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_correction_enabled" />
+                    <label for="dc_correction_enabled">Auto-inject Author's Notes</label>
+                    <span class="dc_tooltip">
+                        <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                        <span class="dc_tooltip_text">When drift is detected, automatically generate and inject behavioral cues as Author's Notes to steer the character back on track.</span>
+                    </span>
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Injection depth
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">How many messages from the bottom of context to inject the correction. Lower = closer to the end = stronger influence.</span>
+                            </span>
+                        </span>
+                        <span id="dc_correction_depth_value" class="dc_setting_value">4</span>
+                    </div>
+                    <input type="range" id="dc_correction_depth" class="dc_compact_slider" min="1" max="10" step="1" value="4" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Max traits to reinforce
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Maximum number of traits to include in a single correction. Too many dilutes the effect.</span>
+                            </span>
+                        </span>
+                        <span id="dc_correction_max_traits_value" class="dc_setting_value">3</span>
+                    </div>
+                    <input type="range" id="dc_correction_max_traits" class="dc_compact_slider" min="1" max="5" step="1" value="3" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Patience
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Number of scored messages to wait before evaluating if a correction is working.</span>
+                            </span>
+                        </span>
+                        <span id="dc_correction_patience_value" class="dc_setting_value">3</span>
+                    </div>
+                    <input type="range" id="dc_correction_patience" class="dc_compact_slider" min="1" max="7" step="1" value="3" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Max attempts
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Maximum correction regeneration attempts before marking a trait as ceiling-reached and alerting the user.</span>
+                            </span>
+                        </span>
+                        <span id="dc_correction_max_attempts_value" class="dc_setting_value">2</span>
+                    </div>
+                    <input type="range" id="dc_correction_max_attempts" class="dc_compact_slider" min="1" max="5" step="1" value="2" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Cooldown
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Scored messages to wait after removing a correction before allowing re-injection. Prevents oscillation.</span>
+                            </span>
+                        </span>
+                        <span id="dc_correction_cooldown_value" class="dc_setting_value">2</span>
+                    </div>
+                    <input type="range" id="dc_correction_cooldown" class="dc_compact_slider" min="0" max="5" step="1" value="2" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Recovery margin
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Hysteresis band: corrections are only cleared when the trait score exceeds drift threshold + this margin. Prevents flapping between corrected/uncorrected states. Example: threshold 0.40 + margin 0.10 = must reach 0.50 to clear.</span>
+                            </span>
+                        </span>
+                        <span id="dc_recovery_margin_value" class="dc_setting_value">0.10</span>
+                    </div>
+                    <input type="range" id="dc_recovery_margin" class="dc_compact_slider" min="0.0" max="0.3" step="0.05" value="0.1" />
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Recovery patience
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">Number of consecutive scoring cycles with all traits above recovery threshold before clearing a correction. Prevents premature correction removal.</span>
+                            </span>
+                        </span>
+                        <span id="dc_recovery_patience_value" class="dc_setting_value">2</span>
+                    </div>
+                    <input type="range" id="dc_recovery_patience" class="dc_compact_slider" min="1" max="5" step="1" value="2" />
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Baseline Author's Note -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-anchor"></i> Baseline Author's Note
+                </div>
+
+                <div class="dc_info_box">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>A lightweight, always-present Author's Note that anchors the character's core personality. Prevents drift before it starts, rather than only correcting after the fact.</span>
+                </div>
+
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_baseline_enabled" />
+                    <label for="dc_baseline_enabled">Enable baseline Author's Note</label>
+                    <span class="dc_tooltip">
+                        <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                        <span class="dc_tooltip_text">Continuously inject a subtle personality anchor derived from extracted traits. Generated once during trait extraction.</span>
+                    </span>
+                </div>
+
+                <div class="dc_compact_setting">
+                    <div class="dc_setting_header">
+                        <span class="dc_setting_label">
+                            Baseline depth
+                            <span class="dc_tooltip">
+                                <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                <span class="dc_tooltip_text">How many messages from the bottom of context to inject the baseline. Separate from correction depth.</span>
+                            </span>
+                        </span>
+                        <span id="dc_baseline_depth_value" class="dc_setting_value">6</span>
+                    </div>
+                    <input type="range" id="dc_baseline_depth" class="dc_compact_slider" min="1" max="10" step="1" value="6" />
+                </div>
+
+                <hr class="dc_section_divider" />
+
+                <!-- Display -->
+                <div class="dc_section_header">
+                    <i class="fa-solid fa-eye"></i> Display
+                </div>
+
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_show_per_message_badges" />
+                    <label for="dc_show_per_message_badges">Show trait badges on messages</label>
+                    <span class="dc_tooltip">
+                        <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                        <span class="dc_tooltip_text">Display color-coded trait score badges on scored chat messages.</span>
+                    </span>
+                </div>
+
+                <div class="dc_compact_checkbox">
+                    <input type="checkbox" id="dc_show_toast_on_drift" />
+                    <label for="dc_show_toast_on_drift">Toast notification on drift detected</label>
+                    <span class="dc_tooltip">
+                        <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                        <span class="dc_tooltip_text">Show a pop-up notification when character drift is detected.</span>
+                    </span>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
