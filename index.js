@@ -265,6 +265,8 @@ SCORING SCALE: Use ONLY these discrete values: 0.0, 0.25, 0.5, 0.75, 1.0, or nul
 - null = {{character_name}} shows no behavior relevant to this dimension in this response
 - Do NOT score low just because the scene doesn't feature it — use null instead
 - Score what {{character_name}} DOES in this response, not what you expect from the character description
+- Each dimension below shows the character's calibrated target. Use this ONLY to understand what "normal" looks like for this character — score what they DO, but be aware that a score 2+ steps from the target represents significant personality deviation
+- IMPORTANT: For dimensions with low targets (below 0.25), be strict about higher scores. A 0.50 means actively demonstrating the high end of this trait — mere absence of the low-end behavior is 0.25, not 0.50. Cooperativeness 0.50 means genuinely accommodating, not just "not fighting right now." Sociability 0.50 means actively seeking engagement, not just responding when addressed.
 
 DIMENSIONS TO SCORE:
 {{dimensions_with_rubrics}}
@@ -424,6 +426,8 @@ function create_empty_chat_state() {
         corrections_injected: 0,
         ever_corrected_dimensions: [],     // Dimension IDs that were ever corrected
         ever_cusum_triggered: [],          // Dimension IDs where CUSUM ever triggered drift
+        ever_ma_triggered: [],             // Dimension IDs where MA fallback triggered drift
+        ma_consecutive_above: {},          // Per-dimension: consecutive scoring cycles with deviation > threshold (for MA fallback)
         cusum_reset_after: {},             // Per-dimension: message_id after which CUSUM restarts (prevents false re-triggers)
         last_scored_message_id: null,
         baseline_text: null,
@@ -1265,10 +1269,11 @@ async function score_response(response_text, dimensions, char_description, messa
         // Build dimension descriptions with rubric anchors for this chunk
         const dimensions_with_rubrics = chunk.map(d => {
             const ctx = d.context ? `\n  Character context: ${d.context}` : '';
+            const target_note = d.target !== undefined ? `\n  Calibrated target: ${d.target.toFixed(2)}` : '';
             const rubric_text = Object.entries(d.rubric)
                 .map(([level, desc]) => `    ${level}: ${desc}`)
                 .join('\n');
-            return `- ${d.id}: ${d.low_label} (0.0) <-> ${d.high_label} (1.0)\n  ${d.scoring_guidance}${ctx}\n  Rubric:\n${rubric_text}`;
+            return `- ${d.id}: ${d.low_label} (0.0) <-> ${d.high_label} (1.0)\n  ${d.scoring_guidance}${target_note}${ctx}\n  Rubric:\n${rubric_text}`;
         }).join('\n\n');
 
         const prompt = SCORING_PROMPT
@@ -1403,9 +1408,10 @@ function update_drift_state(dimensions, score_history, cusum_reset_after = {}) {
     const severe_allowance = Math.max(alert_threshold * 0.5, 0.125);
     const base_severe_decision = severe_allowance * drift_window * 0.5;
 
-    // Bonferroni correction (Šidák-like sqrt(n) scaling for correlated dimensions).
-    // With 11 dimensions: factor ≈ 3.32, requiring ~8-10 above-allowance deviations instead of ~4-5.
-    const bonferroni_factor = dimensions.length > 1 ? Math.sqrt(dimensions.length) : 1;
+    // Multiple-comparisons correction (log-sqrt scaling for correlated dimensions).
+    // With 11 dimensions: factor ≈ 1.89, requiring ~6-7 above-allowance deviations instead of ~4-5.
+    // Uses sqrt(log2(n+1)) instead of sqrt(n) to remain effective in typical session lengths (10-20 scored messages).
+    const bonferroni_factor = dimensions.length > 1 ? Math.sqrt(Math.log2(dimensions.length + 1)) : 1;
     const decision_threshold = base_decision_threshold * bonferroni_factor;
     const severe_decision = base_severe_decision * bonferroni_factor;
 
@@ -1866,14 +1872,40 @@ async function score_and_process_message(message_index, { force = false } = {}) 
 
         // Filter out ceiling-reached dimensions; drifting = CUSUM-triggered dimensions
         const threshold = get_settings('drift_threshold');
+        const ceiling = state.ceiling_dimensions || [];
         const drifting = Object.entries(drift)
-            .filter(([dim_id, d]) => d.correcting && !(state.ceiling_dimensions || []).includes(dim_id))
+            .filter(([dim_id, d]) => d.correcting && !ceiling.includes(dim_id))
             .map(([dim_id, d]) => ({ dim_id, ...d }));
 
-        // Track which dimensions have ever had CUSUM trigger (for accurate report verdicts)
+        // MA fallback trigger: catch obvious drift that CUSUM is too slow to accumulate on.
+        // If a dimension's moving-average deviation exceeds the threshold for >= 3 consecutive
+        // scoring cycles (and CUSUM hasn't triggered), treat it as drifting.
+        const MA_CONSECUTIVE_REQUIRED = 3;
+        if (!state.ma_consecutive_above) state.ma_consecutive_above = {};
+        const cusum_triggered_ids_set = new Set(drifting.map(d => d.dim_id));
+        for (const [dim_id, d] of Object.entries(drift)) {
+            if (ceiling.includes(dim_id) || cusum_triggered_ids_set.has(dim_id)) {
+                // Already handled by CUSUM or ceiling — reset MA counter
+                state.ma_consecutive_above[dim_id] = 0;
+                continue;
+            }
+            if (d.deviation !== null && d.deviation > threshold && d.trend !== 'no_data' && d.trend !== 'insufficient_data') {
+                state.ma_consecutive_above[dim_id] = (state.ma_consecutive_above[dim_id] || 0) + 1;
+            } else {
+                state.ma_consecutive_above[dim_id] = 0;
+            }
+            if (state.ma_consecutive_above[dim_id] >= MA_CONSECUTIVE_REQUIRED) {
+                log(`MA fallback trigger: ${dim_id} deviation ${d.deviation?.toFixed(3)} > ${threshold} for ${state.ma_consecutive_above[dim_id]} consecutive cycles`);
+                drifting.push({ dim_id, ...d, ma_triggered: true });
+            }
+        }
+
+        // Track which dimensions have ever had CUSUM or MA trigger (for accurate report verdicts)
         if (drifting.length > 0) {
-            const cusum_triggered_ids = drifting.map(d => d.dim_id);
+            const cusum_triggered_ids = drifting.filter(d => !d.ma_triggered).map(d => d.dim_id);
+            const ma_triggered_ids = drifting.filter(d => d.ma_triggered).map(d => d.dim_id);
             state.ever_cusum_triggered = [...new Set([...(state.ever_cusum_triggered || []), ...cusum_triggered_ids])];
+            state.ever_ma_triggered = [...new Set([...(state.ever_ma_triggered || []), ...ma_triggered_ids])];
         }
 
         if (drifting.length > 0) {
@@ -1939,10 +1971,12 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                         .filter(d => d.deviation === null || d.deviation > recovery_threshold);
 
                     if (corrected_still_drifting.length === 0) {
-                        // All corrected dimensions recovered — set CUSUM reset markers
+                        // All corrected dimensions recovered — set CUSUM reset markers and clear MA counters
                         if (!state.cusum_reset_after) state.cusum_reset_after = {};
+                        if (!state.ma_consecutive_above) state.ma_consecutive_above = {};
                         for (const dim_id of correction.dim_ids) {
                             state.cusum_reset_after[dim_id] = state.last_scored_message_id;
+                            state.ma_consecutive_above[dim_id] = 0;
                             log(`CUSUM reset marker set for ${dim_id} at message #${state.last_scored_message_id}`);
                         }
                         clear_correction();
@@ -2090,10 +2124,12 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                 state.recovery_cycles = (state.recovery_cycles || 0) + 1;
                 const needed = get_settings('recovery_patience');
                 if (state.recovery_cycles >= needed) {
-                    // Set CUSUM reset markers for recovered dimensions
+                    // Set CUSUM reset markers and clear MA counters for recovered dimensions
                     if (!state.cusum_reset_after) state.cusum_reset_after = {};
+                    if (!state.ma_consecutive_above) state.ma_consecutive_above = {};
                     for (const dim_id of corrected_dim_ids) {
                         state.cusum_reset_after[dim_id] = state.last_scored_message_id;
+                        state.ma_consecutive_above[dim_id] = 0;
                         log(`CUSUM reset marker set for ${dim_id} at message #${state.last_scored_message_id}`);
                     }
                     clear_correction();
@@ -2201,7 +2237,17 @@ function compute_card_resilience(score_history, dimensions, corrections_count) {
 
     const correction_penalty = corrections_count > 0 ? 0.85 : 1.0;
 
-    return Math.round(initial * 40 + mean(drift_resistance) * 50 + correction_penalty * 10);
+    // Deviation penalty: scale drift_resistance down when mean deviation is high.
+    // This prevents inflated scores when drift goes undetected (no corrections fired
+    // but dimensions are clearly off-target).
+    const all_mean_devs = scored_dims.map(d => {
+        const scores = windowed_history.map(s => s.scores[d.id]).filter(s => s !== undefined);
+        return scores.length > 0 ? Math.abs(mean(scores) - d.target) : 0;
+    });
+    const overall_mean_dev = all_mean_devs.length > 0 ? mean(all_mean_devs) : 0;
+    const deviation_factor = Math.max(0.5, 1 - overall_mean_dev * 1.5);  // 0.20 dev → 0.70 factor, 0.33 dev → 0.50 factor
+
+    return Math.round(initial * 40 + mean(drift_resistance) * deviation_factor * 50 + correction_penalty * 10);
 }
 
 /**
@@ -2248,24 +2294,37 @@ function compute_session_quality(score_history, dimensions, drift_state) {
  */
 function compute_model_compatibility(dimensions, ceiling_dimensions, corrections_count, score_history, drift_state) {
     if (score_history.length === 0) return 0;
+    const threshold = get_settings('drift_threshold');
 
     const ceiling_ratio = dimensions.length > 0 ? 1 - (ceiling_dimensions.length / dimensions.length) : 1;
 
-    const correction_load = Math.max(0, 1 - (corrections_count / (score_history.length * 0.5 || 1)));
+    // Correction load: penalize both corrections that fired AND undetected drift.
+    // If no corrections fired but dimensions have significant deviation, apply a penalty
+    // so the score doesn't reward inert detection.
+    let correction_load = Math.max(0, 1 - (corrections_count / (score_history.length * 0.5 || 1)));
+    if (corrections_count === 0 && score_history.length >= 5) {
+        const dev_values_all = Object.values(drift_state).map(d => d.deviation ?? 0);
+        const dims_above_threshold = dev_values_all.filter(d => d > threshold).length;
+        if (dims_above_threshold > 0 && dimensions.length > 0) {
+            const undetected_penalty = dims_above_threshold / dimensions.length;
+            correction_load = Math.max(0, correction_load - undetected_penalty * 0.5);
+        }
+    }
 
-    // End health: how close the final drift state is to targets
+    // End health: how close the final drift state is to targets (increased weight)
     const dev_values = Object.values(drift_state).map(d => d.deviation ?? 0);
     const end_health = dev_values.length > 0 ? Math.max(0, 1 - mean(dev_values)) : 0.5;
 
-    return Math.round(ceiling_ratio * 40 + correction_load * 30 + end_health * 30);
+    return Math.round(ceiling_ratio * 35 + correction_load * 25 + end_health * 40);
 }
 
 /**
  * Classify a dimension's verdict based on session behavior.
- * Uses CUSUM trigger history for drift detection consistency (not raw score thresholds,
- * which would flag single outliers that CUSUM correctly ignores as noise).
+ * Uses CUSUM and MA trigger history for drift detection consistency, with a
+ * deviation-based fallback so dimensions with clear drift aren't labeled 'natural_fit'
+ * just because statistical triggers didn't fire in short sessions.
  */
-function compute_dimension_verdict(dimension, score_history, drift_state, ceiling_dimensions, ever_corrected_dimensions, ever_cusum_triggered) {
+function compute_dimension_verdict(dimension, score_history, drift_state, ceiling_dimensions, ever_corrected_dimensions, ever_cusum_triggered, ever_ma_triggered) {
     const threshold = get_settings('drift_threshold');
 
     if ((ceiling_dimensions || []).includes(dimension.id)) {
@@ -2277,11 +2336,21 @@ function compute_dimension_verdict(dimension, score_history, drift_state, ceilin
         return 'insufficient_data';
     }
 
-    // Use CUSUM trigger history: consistent with how drift detection actually works.
-    // A single outlier score won't count as "ever drifted" unless CUSUM accumulated enough.
-    const ever_drifted = (ever_cusum_triggered || []).includes(dimension.id);
+    // Check both CUSUM and MA trigger history
+    const ever_drifted = (ever_cusum_triggered || []).includes(dimension.id)
+        || (ever_ma_triggered || []).includes(dimension.id);
 
     if (!ever_drifted) {
+        // Deviation-based fallback: if mean score deviation exceeds threshold across
+        // enough data points, this is not a 'natural_fit' — it's drift the system didn't correct.
+        const MIN_SCORES_FOR_DEVIATION_VERDICT = 5;
+        if (actual_scores.length >= MIN_SCORES_FOR_DEVIATION_VERDICT) {
+            const scores = actual_scores.map(s => s.scores[dimension.id]);
+            const mean_deviation = Math.abs(mean(scores) - dimension.target);
+            if (mean_deviation > threshold) {
+                return 'volatile';  // Drifted but never triggered correction
+            }
+        }
         return 'natural_fit';
     }
 
@@ -2327,7 +2396,7 @@ async function generate_report() {
         dimension_verdicts[dim.id] = compute_dimension_verdict(
             dim, state.score_history, state.drift_state,
             state.ceiling_dimensions || [], state.ever_corrected_dimensions || [],
-            state.ever_cusum_triggered || [],
+            state.ever_cusum_triggered || [], state.ever_ma_triggered || [],
         );
         dimension_curves[dim.id] = state.score_history.map(s => s.scores[dim.id]).filter(s => s !== undefined);
     }
@@ -3633,6 +3702,8 @@ function initialize_ui_listeners() {
         state.active_correction = { enabled: false };
         state.ceiling_dimensions = [];
         state.ever_cusum_triggered = [];
+        state.ever_ma_triggered = [];
+        state.ma_consecutive_above = {};
         state.cooldown_remaining = 0;
         state.recovery_cycles = 0;
         state.report = null;
@@ -3805,6 +3876,8 @@ function register_event_listeners() {
             state.ceiling_dimensions = [];
             state.ever_corrected_dimensions = [];
             state.ever_cusum_triggered = [];
+            state.ever_ma_triggered = [];
+            state.ma_consecutive_above = {};
             state.cusum_reset_after = {};
             state.messages_scored = 0;
             state.last_scored_message_id = null;
