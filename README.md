@@ -4,15 +4,7 @@ A SillyTavern extension that monitors live roleplay conversations for character 
 
 ## The Problem
 
-LLM characters degrade into "slop" over long roleplay conversations. Research identifies five layers of drift:
-
-- **Context rot** (~30%) -- Important character details fall out of the context window
-- **RLHF personality bias** (~25%) -- Models revert to helpful/agreeable defaults
-- **Lost-in-the-middle** (~15%) -- Attention effects deprioritize mid-context information
-- **Safety alignment floors** (~15%) -- Models resist sustained negative emotional states
-- **Snowball drift** (~15%) -- Small deviations compound over turns
-
-Character card quality alone addresses ~30% of the problem. DriftGuard handles the remaining ~70% with runtime intervention.
+LLM characters degrade into generic, agreeable personas over long roleplay conversations. Multiple well-documented factors contribute: important character details fall out of the context window ([context rot](https://redis.io/blog/context-rot/)), models revert to helpful defaults due to alignment training ([RLHF personality bias](https://arxiv.org/html/2502.03821v1)), mid-context information gets deprioritized ([lost-in-the-middle effect](https://arxiv.org/abs/2307.03172)), and small deviations compound over turns ([error snowballing](https://arxiv.org/abs/2305.13534)). Character card quality helps, but can't fully prevent runtime drift -- DriftGuard addresses this with active monitoring and correction.
 
 ## How It Works
 
@@ -37,7 +29,7 @@ Two components in one repo:
 Copy or clone this entire repository into SillyTavern's third-party extensions directory:
 
 ```
-data/default-user/extensions/third-party/Character-Drift-Corrector/
+data/default-user/extensions/third-party/DriftGuard/
 ```
 
 ### 2. Server Plugin (for Claude Code backend only)
