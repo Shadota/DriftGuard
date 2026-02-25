@@ -7,20 +7,20 @@
         <div class="inline-drawer-content">
 
             <!-- Tab Navigation -->
-            <div class="dc_tabs">
-                <button class="dc_tab dc_tab_active" data-tab="overview">
-                    <i class="fa-solid fa-shield-halved"></i> Overview
+            <div class="dc_tabs" role="tablist" aria-label="DriftGuard panels">
+                <button class="dc_tab dc_tab_active" data-tab="overview" role="tab" aria-selected="true" aria-controls="dc_panel_overview">
+                    <i class="fa-solid fa-shield-halved" aria-hidden="true"></i> Overview
                 </button>
-                <button class="dc_tab" data-tab="report">
-                    <i class="fa-solid fa-file-lines"></i> Report
+                <button class="dc_tab" data-tab="report" role="tab" aria-selected="false" aria-controls="dc_panel_report">
+                    <i class="fa-solid fa-file-lines" aria-hidden="true"></i> Report
                 </button>
-                <button class="dc_tab" data-tab="settings">
-                    <i class="fa-solid fa-gear"></i> Settings
+                <button class="dc_tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="dc_panel_settings">
+                    <i class="fa-solid fa-gear" aria-hidden="true"></i> Settings
                 </button>
             </div>
 
             <!-- ==================== OVERVIEW TAB ==================== -->
-            <div class="dc_tab_content dc_tab_content_active" data-tab="overview">
+            <div class="dc_tab_content dc_tab_content_active" data-tab="overview" id="dc_panel_overview" role="tabpanel">
 
                 <!-- Status Bar -->
                 <div class="dc_overview_section">
@@ -46,9 +46,9 @@
                     </div>
                 </div>
 
-                <!-- Trait Health -->
+                <!-- Dimension Health -->
                 <div class="dc_overview_section">
-                    <h4><i class="fa-solid fa-heartbeat"></i> Trait Health</h4>
+                    <h4><i class="fa-solid fa-heartbeat"></i> Dimension Health</h4>
                     <div id="dc_trait_health_container">
                         <div class="dc_empty_state">
                             <i class="fa-solid fa-user-slash"></i>
@@ -64,7 +64,7 @@
                         <div class="dc_correction_info">
                             <div class="dc_stat_row">
                                 <span class="dc_stat_label">Reinforcing</span>
-                                <span id="dc_correction_traits" class="dc_stat_value">--</span>
+                                <span id="dc_correction_dims" class="dc_stat_value">--</span>
                             </div>
                             <div class="dc_stat_row">
                                 <span class="dc_stat_label">Attempt</span>
@@ -89,7 +89,7 @@
                     </div>
                 </div>
 
-                <!-- Ceiling Traits Warning -->
+                <!-- Ceiling Dimensions Warning -->
                 <div class="dc_overview_section" id="dc_ceiling_section" style="display: none;">
                     <div class="dc_status_message dc_status_warning">
                         <i class="fa-solid fa-triangle-exclamation"></i>
@@ -106,8 +106,8 @@
                         <div id="dc_btn_score_chat" class="menu_button" title="Retroactively score all unscored AI messages in this chat">
                             <i class="fa-solid fa-backward"></i> Score Chat
                         </div>
-                        <div id="dc_btn_reextract" class="menu_button" title="Re-analyze the character card and extract personality traits">
-                            <i class="fa-solid fa-rotate"></i> Re-extract Traits
+                        <div id="dc_btn_reextract" class="menu_button" title="Re-analyze the character card and calibrate behavioral dimensions">
+                            <i class="fa-solid fa-rotate"></i> Recalibrate Dimensions
                         </div>
                         <div id="dc_btn_clear_corrections" class="menu_button" title="Remove the current Author's Note injection">
                             <i class="fa-solid fa-eraser"></i> Clear Corrections
@@ -120,7 +120,7 @@
             </div>
 
             <!-- ==================== REPORT TAB ==================== -->
-            <div class="dc_tab_content" data-tab="report">
+            <div class="dc_tab_content" data-tab="report" id="dc_panel_report" role="tabpanel">
 
                 <!-- Generate Button -->
                 <div class="dc_overview_section">
@@ -162,9 +162,9 @@
                         </div>
                     </div>
 
-                    <!-- Trait Verdicts -->
+                    <!-- Dimension Verdicts -->
                     <div class="dc_overview_section">
-                        <h4><i class="fa-solid fa-gavel"></i> Trait Verdicts</h4>
+                        <h4><i class="fa-solid fa-gavel"></i> Dimension Verdicts</h4>
                         <div id="dc_report_verdicts"></div>
                     </div>
 
@@ -205,7 +205,7 @@
             </div>
 
             <!-- ==================== SETTINGS TAB ==================== -->
-            <div class="dc_tab_content" data-tab="settings">
+            <div class="dc_tab_content" data-tab="settings" id="dc_panel_settings" role="tabpanel">
 
                 <!-- Master Switch -->
                 <div class="dc_compact_checkbox">
@@ -222,7 +222,7 @@
 
                 <div class="dc_info_box">
                     <i class="fa-solid fa-circle-info"></i>
-                    <span>The analysis backend is separate from your roleplay model. DriftGuard uses it to judge character responses for trait adherence.</span>
+                    <span>The analysis backend is separate from your roleplay model. DriftGuard uses it to score character responses on behavioral dimensions.</span>
                 </div>
 
                 <div class="dc_compact_setting" style="margin-bottom: 10px;">
@@ -349,7 +349,7 @@
                             Moving average window
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Number of recent scored messages to include in the moving average calculation.</span>
+                                <span class="dc_tooltip_text">Number of recent scored messages for drift calculations. Larger windows require more accumulated evidence to trigger drift detection.</span>
                             </span>
                         </span>
                         <span id="dc_drift_window_value" class="dc_setting_value">8</span>
@@ -363,12 +363,12 @@
                             Drift threshold
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Trait scores below this value trigger drift correction. Lower = more tolerant. Range: 0.0-1.0.</span>
+                                <span class="dc_tooltip_text">Sensitivity for drift detection. Controls noise tolerance and accumulated evidence needed to trigger correction. Higher = more tolerant.</span>
                             </span>
                         </span>
-                        <span id="dc_drift_threshold_value" class="dc_setting_value">0.40</span>
+                        <span id="dc_drift_threshold_value" class="dc_setting_value">0.20</span>
                     </div>
-                    <input type="range" id="dc_drift_threshold" class="dc_compact_slider" min="0.1" max="0.8" step="0.05" value="0.4" />
+                    <input type="range" id="dc_drift_threshold" class="dc_compact_slider" min="0.05" max="0.50" step="0.05" value="0.20" />
                 </div>
 
                 <div class="dc_compact_setting">
@@ -377,12 +377,12 @@
                             Alert threshold
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Scores below this trigger a severe drift alert with more aggressive correction. Must be lower than drift threshold.</span>
+                                <span class="dc_tooltip_text">Sensitivity for severe drift alerts. Uses more aggressive detection that triggers faster for larger deviations.</span>
                             </span>
                         </span>
-                        <span id="dc_drift_alert_threshold_value" class="dc_setting_value">0.25</span>
+                        <span id="dc_drift_alert_threshold_value" class="dc_setting_value">0.35</span>
                     </div>
-                    <input type="range" id="dc_drift_alert_threshold" class="dc_compact_slider" min="0.05" max="0.5" step="0.05" value="0.25" />
+                    <input type="range" id="dc_drift_alert_threshold" class="dc_compact_slider" min="0.10" max="0.60" step="0.05" value="0.35" />
                 </div>
 
                 <hr class="dc_section_divider" />
@@ -418,15 +418,15 @@
                 <div class="dc_compact_setting">
                     <div class="dc_setting_header">
                         <span class="dc_setting_label">
-                            Max traits to reinforce
+                            Max dimensions to correct
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Maximum number of traits to include in a single correction. Too many dilutes the effect.</span>
+                                <span class="dc_tooltip_text">Maximum number of dimensions to include in a single correction. Too many dilutes the effect.</span>
                             </span>
                         </span>
-                        <span id="dc_correction_max_traits_value" class="dc_setting_value">3</span>
+                        <span id="dc_correction_max_dimensions_value" class="dc_setting_value">3</span>
                     </div>
-                    <input type="range" id="dc_correction_max_traits" class="dc_compact_slider" min="1" max="5" step="1" value="3" />
+                    <input type="range" id="dc_correction_max_dimensions" class="dc_compact_slider" min="1" max="5" step="1" value="3" />
                 </div>
 
                 <div class="dc_compact_setting">
@@ -449,7 +449,7 @@
                             Max attempts
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Maximum correction regeneration attempts before marking a trait as ceiling-reached and alerting the user.</span>
+                                <span class="dc_tooltip_text">Maximum correction regeneration attempts before marking a dimension as ceiling-reached and alerting the user.</span>
                             </span>
                         </span>
                         <span id="dc_correction_max_attempts_value" class="dc_setting_value">2</span>
@@ -477,12 +477,12 @@
                             Recovery margin
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Hysteresis band: corrections are only cleared when the trait score exceeds drift threshold + this margin. Prevents flapping between corrected/uncorrected states. Example: threshold 0.40 + margin 0.10 = must reach 0.50 to clear.</span>
+                                <span class="dc_tooltip_text">Hysteresis band: corrections are only cleared when deviation from target falls below drift threshold minus this margin. Prevents flapping between corrected/uncorrected states. Example: threshold 0.20 - margin 0.05 = deviation must drop to 0.15 to clear.</span>
                             </span>
                         </span>
-                        <span id="dc_recovery_margin_value" class="dc_setting_value">0.10</span>
+                        <span id="dc_recovery_margin_value" class="dc_setting_value">0.05</span>
                     </div>
-                    <input type="range" id="dc_recovery_margin" class="dc_compact_slider" min="0.0" max="0.3" step="0.05" value="0.1" />
+                    <input type="range" id="dc_recovery_margin" class="dc_compact_slider" min="0.0" max="0.20" step="0.01" value="0.05" />
                 </div>
 
                 <div class="dc_compact_setting">
@@ -491,7 +491,7 @@
                             Recovery patience
                             <span class="dc_tooltip">
                                 <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                                <span class="dc_tooltip_text">Number of consecutive scoring cycles with all traits above recovery threshold before clearing a correction. Prevents premature correction removal.</span>
+                                <span class="dc_tooltip_text">Number of consecutive scoring cycles with all dimensions within recovery threshold before clearing a correction. Prevents premature correction removal.</span>
                             </span>
                         </span>
                         <span id="dc_recovery_patience_value" class="dc_setting_value">2</span>
@@ -508,7 +508,7 @@
 
                 <div class="dc_info_box">
                     <i class="fa-solid fa-circle-info"></i>
-                    <span>A lightweight, always-present Author's Note that anchors the character's core personality. Prevents drift before it starts, rather than only correcting after the fact.</span>
+                    <span>A lightweight, always-present Author's Note that anchors the character's core personality dimensions. Prevents drift before it starts, rather than only correcting after the fact.</span>
                 </div>
 
                 <div class="dc_compact_checkbox">
@@ -516,7 +516,7 @@
                     <label for="dc_baseline_enabled">Enable baseline Author's Note</label>
                     <span class="dc_tooltip">
                         <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                        <span class="dc_tooltip_text">Continuously inject a subtle personality anchor derived from extracted traits. Generated once during trait extraction.</span>
+                        <span class="dc_tooltip_text">Continuously inject a subtle personality anchor derived from calibrated dimensions. Generated once during dimension calibration.</span>
                     </span>
                 </div>
 
@@ -543,10 +543,10 @@
 
                 <div class="dc_compact_checkbox">
                     <input type="checkbox" id="dc_show_per_message_badges" />
-                    <label for="dc_show_per_message_badges">Show trait badges on messages</label>
+                    <label for="dc_show_per_message_badges">Show dimension badges on messages</label>
                     <span class="dc_tooltip">
                         <i class="fa-solid fa-circle-info dc_info_icon"></i>
-                        <span class="dc_tooltip_text">Display color-coded trait score badges on scored chat messages.</span>
+                        <span class="dc_tooltip_text">Display color-coded dimension score badges on scored chat messages.</span>
                     </span>
                 </div>
 

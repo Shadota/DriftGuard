@@ -204,12 +204,13 @@
     font-size: 1.2em;
 }
 
-/* ==================== TRAIT HEALTH BARS ==================== */
+/* ==================== DIMENSION SPECTRUM BARS ==================== */
 .dc_trait_row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
-    padding: 6px 0;
+    gap: 6px 10px;
+    padding: 8px 0;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
 }
 
@@ -217,38 +218,74 @@
     border-bottom: none;
 }
 
-.dc_trait_label {
-    flex: 0 0 160px;
-    font-size: 0.85em;
+/* Dimension labels row: low | center label | high */
+.dc_dim_labels {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    font-size: 0.8em;
+}
+
+.dc_dim_low_label,
+.dc_dim_high_label {
+    flex: 0 0 auto;
+    max-width: 120px;
+    opacity: 0.5;
+    font-size: 0.9em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
+.dc_dim_low_label {
+    text-align: left;
+}
+
+.dc_dim_high_label {
+    text-align: right;
+}
+
+.dc_trait_label {
+    flex: 1;
+    text-align: center;
+    font-size: 0.95em;
+    font-weight: bold;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Spectrum bar container */
 .dc_trait_bar_container {
     flex: 1;
+    min-width: 0;
     height: 16px;
     background: var(--black50a);
     border-radius: 8px;
-    overflow: hidden;
+    overflow: visible;
     position: relative;
 }
 
+/* Score position fill */
 .dc_trait_bar_fill {
     height: 100%;
     border-radius: 8px;
     transition: width 0.4s ease, background 0.4s ease;
 }
 
-/* Threshold marker on trait bar */
-.dc_trait_threshold_marker {
+/* Target marker on spectrum bar */
+.dc_dim_target_marker {
     position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: rgba(255, 255, 255, 0.4);
+    top: -3px;
+    bottom: -3px;
+    width: 3px;
+    background: rgba(255, 255, 255, 0.85);
+    border-radius: 2px;
     transform: translateX(-50%);
     pointer-events: none;
+    box-shadow: 0 0 4px rgba(255, 255, 255, 0.4);
+    z-index: 1;
 }
 
 .dc_trait_score {
@@ -281,7 +318,7 @@
     text-align: right;
 }
 
-/* Trait bar color states */
+/* Spectrum bar color states (based on deviation from target) */
 .dc_bar_green {
     background: linear-gradient(90deg, #2d5016, #4caf50);
 }
@@ -297,6 +334,7 @@
 .dc_bar_correcting {
     background: linear-gradient(90deg, #4a0000, #f44336);
     animation: dc_pulse_bar 1.5s ease-in-out infinite;
+    will-change: opacity;
 }
 
 @keyframes dc_pulse_bar {
@@ -304,22 +342,33 @@
     50% { opacity: 0.6; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+    .dc_bar_correcting,
+    .dc_trend_correcting {
+        animation: none;
+    }
+}
+
 /* Trend colors */
 .dc_trend_stable {
     color: #4caf50;
+}
+
+.dc_trend_drifting {
+    color: #f44336;
 }
 
 .dc_trend_declining {
     color: #f44336;
 }
 
-.dc_trend_improving {
-    color: #2196f3;
-}
-
 .dc_trend_correcting {
     color: #ff9800;
     animation: dc_pulse_text 1.5s ease-in-out infinite;
+}
+
+.dc_trend_improving {
+    color: #2196f3;
 }
 
 .dc_trend_no_data {
@@ -446,16 +495,16 @@
 }
 
 /* Score color coding */
-.dc_score_high {
-    background: linear-gradient(90deg, #2d5016, #4caf50) !important;
+#driftguard_settings .dc_score_high {
+    background: linear-gradient(90deg, #2d5016, #4caf50);
 }
 
-.dc_score_medium {
-    background: linear-gradient(90deg, #4a4a00, #ffcc00) !important;
+#driftguard_settings .dc_score_medium {
+    background: linear-gradient(90deg, #4a4a00, #ffcc00);
 }
 
-.dc_score_low {
-    background: linear-gradient(90deg, #4a0000, #f44336) !important;
+#driftguard_settings .dc_score_low {
+    background: linear-gradient(90deg, #4a0000, #f44336);
 }
 
 /* ==================== VERDICT BADGES ==================== */
@@ -705,13 +754,13 @@
 }
 
 /* ==================== DANGER BUTTON ==================== */
-.menu_button_danger {
-    background: rgba(244, 67, 54, 0.2) !important;
-    border-color: rgba(244, 67, 54, 0.5) !important;
+#driftguard_settings .menu_button_danger {
+    background: rgba(244, 67, 54, 0.2);
+    border-color: rgba(244, 67, 54, 0.5);
 }
 
-.menu_button_danger:hover {
-    background: rgba(244, 67, 54, 0.4) !important;
+#driftguard_settings .menu_button_danger:hover {
+    background: rgba(244, 67, 54, 0.4);
 }
 
 /* ==================== INLINE SETTINGS ==================== */
@@ -755,7 +804,7 @@
     visibility: hidden;
     opacity: 0;
     position: absolute;
-    z-index: 1000;
+    z-index: 100;
     bottom: calc(100% + 8px);
     left: 50%;
     transform: translateX(-50%);
@@ -1013,7 +1062,7 @@
     background-color: var(--SmartThemeBlurTintColor);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 10px;
-    z-index: 10000;
+    z-index: 1001;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     resize: horizontal;
 }
@@ -1095,6 +1144,17 @@
 }
 
 /* ==================== RESPONSIVE POPOUT ==================== */
+@media screen and (max-width: 768px) {
+    #driftguard_settings .dc_button_row {
+        flex-direction: column;
+        gap: 4px;
+    }
+    #driftguard_settings .dc_tab {
+        padding: 6px 10px;
+        font-size: 0.85em;
+    }
+}
+
 @media screen and (max-width: 500px) {
     #dc_popout {
         width: calc(100vw - 20px);

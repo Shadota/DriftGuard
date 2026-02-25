@@ -8,6 +8,11 @@ const PLUGIN_ID = 'driftguard';
 const LOG_PREFIX = '[DriftGuard]';
 const DEFAULT_TIMEOUT_MS = 120000;
 
+// Simple in-memory rate limiter: max 10 requests per 60 seconds
+const RATE_LIMIT_WINDOW_MS = 60000;
+const RATE_LIMIT_MAX = 10;
+const rate_limit_timestamps = [];
+
 // ==================== EXECUTABLE DISCOVERY ====================
 
 let cached_executable = null;
@@ -76,7 +81,11 @@ async function run_claude_cli(prompt, system_prompt, model, timeout_ms = DEFAULT
             '--tools', '',
             '--no-session-persistence',
         ];
-        if (model) args.push('--model', model);
+        if (model && /^[a-zA-Z0-9\-._:\/]+$/.test(model)) {
+            args.push('--model', model);
+        } else if (model) {
+            console.warn(`${LOG_PREFIX} Invalid model name rejected: ${model}`);
+        }
         if (system_prompt) args.push('--system-prompt', system_prompt);
 
         const proc = spawn(executable, args, {
@@ -105,37 +114,51 @@ async function run_claude_cli(prompt, system_prompt, model, timeout_ms = DEFAULT
 
         // Explicit runtime timeout -- kill the process if it exceeds deadline.
         // Note: spawn()'s `timeout` option only applies to spawning, NOT to runtime.
+        let forceKillTimer = null;
         const timer = setTimeout(() => {
+            if (killed) return;
             killed = true;
-            proc.kill('SIGTERM');
+            try { proc.kill('SIGTERM'); } catch { /* may already be dead */ }
             // Force kill after 5s if SIGTERM doesn't work (Windows compatibility)
-            setTimeout(() => {
-                try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+            forceKillTimer = setTimeout(() => {
+                try { if (!proc.killed) proc.kill('SIGKILL'); } catch { /* already dead */ }
             }, 5000);
             settle_reject(new Error(`claude process timed out after ${timeout_ms}ms`));
         }, timeout_ms);
 
         proc.stdout.on('data', (d) => { stdout += d.toString(); });
+        proc.stdout.on('error', (err) => {
+            if (!settled) settle_reject(new Error(`stdout stream error: ${err.message}`));
+        });
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
+        proc.stderr.on('error', (err) => {
+            if (!settled) settle_reject(new Error(`stderr stream error: ${err.message}`));
+        });
 
         // Send prompt via stdin (avoids shell argument length limits)
         proc.stdin.write(prompt);
         proc.stdin.end();
 
         proc.on('close', (code) => {
+            if (forceKillTimer) clearTimeout(forceKillTimer);
             if (killed) return; // Already rejected by timeout
 
             if (code !== 0) {
-                return settle_reject(new Error(`claude exited with code ${code}: ${stderr.substring(0, 500)}`));
+                // Sanitize stderr to avoid leaking API keys or file paths to the frontend
+                const sanitized_stderr = stderr.substring(0, 500)
+                    .replace(/sk-[a-zA-Z0-9_-]+/g, '[REDACTED_KEY]')
+                    .replace(/Bearer\s+[a-zA-Z0-9_-]+/g, 'Bearer [REDACTED]');
+                return settle_reject(new Error(`claude exited with code ${code}: ${sanitized_stderr}`));
             }
 
             try {
                 const outer = JSON.parse(stdout);
-                const content = outer.result || outer.content || stdout;
-                settle_resolve({ content, cost_usd: outer.cost_usd || 0 });
+                const content = (outer.result || outer.content || '').toString().substring(0, 100000);
+                const cost = typeof outer.cost_usd === 'number' ? outer.cost_usd : 0;
+                settle_resolve({ content, cost_usd: cost });
             } catch {
-                // If JSON parse fails, return raw stdout
-                settle_resolve({ content: stdout.trim(), cost_usd: 0 });
+                // If JSON parse fails, return truncated raw stdout
+                settle_resolve({ content: stdout.trim().substring(0, 100000), cost_usd: 0 });
             }
         });
 
@@ -170,6 +193,16 @@ async function init(router) {
 
     // Analysis endpoint -- accepts messages array, runs through claude CLI
     router.post('/analyze', jsonParser, async (req, res) => {
+        // Rate limiting
+        const now = Date.now();
+        while (rate_limit_timestamps.length > 0 && rate_limit_timestamps[0] <= now - RATE_LIMIT_WINDOW_MS) {
+            rate_limit_timestamps.shift();
+        }
+        if (rate_limit_timestamps.length >= RATE_LIMIT_MAX) {
+            return res.status(429).json({ error: `Rate limited: max ${RATE_LIMIT_MAX} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s` });
+        }
+        rate_limit_timestamps.push(now);
+
         try {
             const { messages, model, max_tokens } = req.body;
 

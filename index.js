@@ -1,6 +1,6 @@
 // DriftGuard -- Character Drift Corrector
-// Monitors live roleplay for trait drift and auto-injects targeted Author's Notes
-// to reinforce decaying personality traits.
+// Monitors live roleplay for character personality drift using fixed behavioral dimensions
+// and auto-injects targeted Author's Notes to correct deviations from character targets.
 
 import {
     getStringHash,
@@ -29,68 +29,265 @@ export { MODULE_NAME };
 
 const MODULE_NAME = 'driftguard';
 const MODULE_NAME_FANCY = 'DriftGuard';
-const MODULE_VERSION = '0.3.0';
+const MODULE_VERSION = '0.4.0';
 const LOG_PREFIX = `[${MODULE_NAME_FANCY}]`;
 const MIN_SCORES_FOR_CORRECTION = 2;
 const MIN_SCORES_FOR_VERDICT = 2;
+const FLOAT_EPSILON = 0.001; // Tolerance for floating-point comparisons on score thresholds
+
+// ==================== DIMENSION CATALOG ====================
+
+/**
+ * Fixed behavioral dimensions for character drift monitoring.
+ * Each dimension is a bipolar spectrum scored 0.0-1.0.
+ * The LLM calibrates a target value per character during calibration.
+ * Cross-session comparison is possible because dimension IDs are stable.
+ */
+const DIMENSION_CATALOG = [
+    {
+        id: 'warmth',
+        label: 'Warmth',
+        low_label: 'Cold / Detached',
+        high_label: 'Warm / Affectionate',
+        description: 'How warm or cold the character is in interpersonal interactions.',
+        scoring_guidance: 'Emotional temperature toward others.',
+        ai_default: 0.70,
+        rubric: {
+            '0.0':  'Completely clinical; treats others as objects with zero emotional engagement.',
+            '0.25': 'Mostly detached; polite but distant and impersonal.',
+            '0.5':  'Neutral; neither cold nor warm, engages normally.',
+            '0.75': 'Noticeably caring; warm language, shows concern, friendly.',
+            '1.0':  'Intensely affectionate; openly loving, deeply emotionally invested.',
+        },
+    },
+    {
+        id: 'stability',
+        label: 'Emotional Stability',
+        low_label: 'Volatile / Reactive',
+        high_label: 'Calm / Steady',
+        description: 'How emotionally reactive or composed the character is under pressure.',
+        scoring_guidance: 'Emotional control under pressure.',
+        ai_default: 0.65,
+        rubric: {
+            '0.0':  'Explosive; uncontrolled outbursts, mood swings, emotional chaos.',
+            '0.25': 'Reactive; visibly rattled, struggles to maintain composure.',
+            '0.5':  'Moderate; occasional emotional responses but generally functional.',
+            '0.75': 'Composed; stays calm under most pressure, measured reactions.',
+            '1.0':  'Unflappable; total emotional control, stoic under extreme stress.',
+        },
+    },
+    {
+        id: 'expressiveness',
+        label: 'Emotional Openness',
+        low_label: 'Repressed / Stoic',
+        high_label: 'Expressive / Transparent',
+        description: 'How openly the character shows or hides their emotions.',
+        scoring_guidance: 'Emotional visibility and transparency.',
+        ai_default: 0.75,
+        rubric: {
+            '0.0':  'Completely masked; suppresses all emotion, reveals nothing.',
+            '0.25': 'Guarded; deflects emotional topics, rare glimpses of feeling.',
+            '0.5':  'Moderate; shares some emotions when prompted, not volunteering.',
+            '0.75': 'Open; readily shows emotions, transparent about feelings.',
+            '1.0':  'Wears heart on sleeve; every emotion visible, nothing hidden.',
+        },
+    },
+    {
+        id: 'assertiveness',
+        label: 'Assertiveness',
+        low_label: 'Submissive / Yielding',
+        high_label: 'Dominant / Commanding',
+        description: 'How the character positions themselves in social power dynamics.',
+        scoring_guidance: 'Social power positioning.',
+        ai_default: 0.40,
+        rubric: {
+            '0.0':  'Completely submissive; defers to everyone, no initiative.',
+            '0.25': 'Passive; yields easily, avoids confrontation, follows others.',
+            '0.5':  'Balanced; asserts when needed but doesn\'t dominate.',
+            '0.75': 'Assertive; takes charge, makes decisions, directs conversations.',
+            '1.0':  'Commanding; dominates interactions, controls dynamics, demands compliance.',
+        },
+    },
+    {
+        id: 'sociability',
+        label: 'Sociability',
+        low_label: 'Withdrawn / Reclusive',
+        high_label: 'Outgoing / Engaged',
+        description: 'How much the character seeks or avoids social interaction.',
+        scoring_guidance: 'Social engagement level.',
+        ai_default: 0.80,
+        rubric: {
+            '0.0':  'Total withdrawal; avoids all interaction, minimal responses.',
+            '0.25': 'Reluctant; engages only when necessary, prefers solitude.',
+            '0.5':  'Moderate; participates normally without seeking or avoiding.',
+            '0.75': 'Sociable; actively engages, initiates conversation, shows interest.',
+            '1.0':  'Highly outgoing; enthusiastic engagement, draws others in.',
+        },
+    },
+    {
+        id: 'trust',
+        label: 'Trust',
+        low_label: 'Suspicious / Guarded',
+        high_label: 'Open / Trusting',
+        description: 'How readily the character trusts others and shares vulnerability.',
+        scoring_guidance: 'Openness and willingness to trust.',
+        ai_default: 0.70,
+        rubric: {
+            '0.0':  'Paranoid; assumes betrayal, shares nothing, tests constantly.',
+            '0.25': 'Suspicious; guards information, questions motives, slow to open up.',
+            '0.5':  'Cautious; reasonable wariness, shares selectively.',
+            '0.75': 'Trusting; forthcoming, gives benefit of doubt, shares openly.',
+            '1.0':  'Completely open; vulnerable, trusts implicitly, no guard.',
+        },
+    },
+    {
+        id: 'morality',
+        label: 'Morality',
+        low_label: 'Amoral / Ruthless',
+        high_label: 'Principled / Empathetic',
+        description: 'The character\'s ethical stance and capacity for empathy.',
+        scoring_guidance: 'Moral behavior and empathy.',
+        ai_default: 0.85,
+        rubric: {
+            '0.0':  'Ruthless; purely self-serving, no empathy, willing to harm.',
+            '0.25': 'Selfish; bends rules freely, limited concern for others.',
+            '0.5':  'Pragmatic; follows norms when convenient, situational ethics.',
+            '0.75': 'Principled; consistent moral code, shows genuine empathy.',
+            '1.0':  'Deeply altruistic; self-sacrificing, strong moral convictions.',
+        },
+    },
+    {
+        id: 'verbosity',
+        label: 'Verbosity',
+        low_label: 'Terse / Cryptic',
+        high_label: 'Verbose / Elaborate',
+        description: 'How much the character talks and how elaborate their communication is.',
+        scoring_guidance: 'Communication volume and elaboration.',
+        ai_default: 0.80,
+        rubric: {
+            '0.0':  'Minimal; one-word answers, grunts, silence, clipped phrases.',
+            '0.25': 'Terse; short sentences, conveys minimum necessary information.',
+            '0.5':  'Normal; standard conversational length, adequate detail.',
+            '0.75': 'Elaborate; detailed explanations, full descriptions, articulate.',
+            '1.0':  'Highly verbose; lengthy speeches, extensive detail, flowery language.',
+        },
+    },
+    {
+        id: 'cooperativeness',
+        label: 'Cooperativeness',
+        low_label: 'Defiant / Stubborn',
+        high_label: 'Agreeable / Flexible',
+        description: 'How willing the character is to cooperate, compromise, and go along with others.',
+        scoring_guidance: 'Willingness to cooperate and compromise.',
+        ai_default: 0.75,
+        rubric: {
+            '0.0':  'Defiant; refuses all requests, confrontational, oppositional.',
+            '0.25': 'Stubborn; resists compromise, insists on own way.',
+            '0.5':  'Moderate; willing to negotiate, neither rigid nor pushover.',
+            '0.75': 'Cooperative; accommodating, goes along with others\' ideas.',
+            '1.0':  'Completely agreeable; always yields, eager to please.',
+        },
+    },
+    {
+        id: 'humor',
+        label: 'Humor',
+        low_label: 'Serious / Grim',
+        high_label: 'Playful / Witty',
+        description: 'The character\'s use of humor, wit, or levity in interactions.',
+        scoring_guidance: 'Humor presence and playfulness.',
+        ai_default: 0.50,
+        rubric: {
+            '0.0':  'Gravely serious; no humor whatsoever, grim tone throughout.',
+            '0.25': 'Mostly serious; rare dry or deadpan moments, humorless default.',
+            '0.5':  'Moderate; occasional light humor, balanced tone.',
+            '0.75': 'Witty; frequent jokes, playful banter, sarcastic quips.',
+            '1.0':  'Constantly playful; everything is a joke, relentless wit.',
+        },
+    },
+    {
+        id: 'romanticism',
+        label: 'Romantic Receptivity',
+        low_label: 'Avoidant / Hostile',
+        high_label: 'Receptive / Affectionate',
+        description: 'How the character handles romantic dynamics and intimacy.',
+        scoring_guidance: 'Romantic openness and receptivity.',
+        ai_default: 0.60,
+        rubric: {
+            '0.0':  'Hostile; actively rejects romance, repulsed by intimacy.',
+            '0.25': 'Avoidant; deflects romantic signals, uncomfortable with intimacy.',
+            '0.5':  'Neutral; neither seeks nor avoids, responds normally.',
+            '0.75': 'Receptive; welcomes romantic cues, shows affection openly.',
+            '1.0':  'Intensely romantic; initiates intimacy, deeply affectionate.',
+        },
+    },
+];
+
+/** Quick lookup: dimension ID → catalog entry */
+const DIMENSION_MAP = Object.fromEntries(DIMENSION_CATALOG.map(d => [d.id, d]));
+
+/** All valid dimension IDs */
+const DIMENSION_IDS = DIMENSION_CATALOG.map(d => d.id);
 
 // ==================== PROMPTS ====================
 
-const TRAIT_EXTRACTION_PROMPT = `You are a character analyst. Given this character card description, identify the 3-7 most dominant personality traits that an AI model might drift away from during a long conversation.
+const CALIBRATION_PROMPT = `You are a character analyst. Given this character description, calibrate {{character_name}}'s position on each behavioral dimension.
 
-Focus on traits that:
-- Conflict with typical AI helpfulness/agreeableness (cold, hostile, avoidant, manipulative)
-- Require sustained negative emotional states (trauma, distrust, fear)
-- Go against conversational norms (terse, nonverbal, evasive)
-- Are specific and distinctive behaviors that could flatten into generic AI responses
-- Give this character a UNIQUE voice that could drift toward bland/generic (distinctive speech patterns, quirky mannerisms, unusual perspectives, specific humor style)
-- Could lose their specificity over time (e.g., a cheerful character becoming generically pleasant, an intellectual character becoming generically knowledgeable, a quirky character becoming conventionally normal)
-- Are specific behaviors, not generic descriptors
+Each dimension is a spectrum from 0.0 to 1.0. Set a TARGET value representing where {{character_name}} typically sits on each spectrum. Use the full range — 0.0 and 1.0 are valid if the character is at an extreme.
 
-IMPORTANT: Drift is not just about "nice vs. mean." Characters drift toward BLANDNESS. A warm healer drifts toward generic warmth. A wise mentor drifts toward generic advice-giving. A sarcastic friend drifts toward generic humor. Identify the SPECIFIC traits that make this character distinct from a generic version of their archetype.
+DIMENSIONS:
+{{dimensions_list}}
 
-For each trait provide:
-- label: Short name (2-5 words)
-- description: One sentence describing the behavioral expectation
-- dimension: One of: temperament, sociability, emotional, moral, trust, communication, romance
-- polarity: "low" or "high" on that dimension
-- keywords: 3-5 words that indicate this trait is being expressed
+If a dimension is completely irrelevant to this character (e.g., romantic receptivity for a non-romantic character), set it to null.
+
+For each active dimension, also provide a brief "context" sentence describing HOW this specific character expresses that position on the spectrum. This context helps scoring be character-specific.
 
 CHARACTER DESCRIPTION:
 {{description}}
 
-Respond with ONLY a JSON array. No other text.`;
+Respond with ONLY a JSON object. No other text.
+Example format:
+{
+    "warmth": { "target": 0.15, "context": "Speaks in clinical observations, treats people as data points" },
+    "stability": { "target": 0.30, "context": "Prone to sudden outbursts of rage when contradicted" },
+    "romanticism": null
+}`;
 
-const SCORING_PROMPT = `Score this character response for adherence to each personality trait. Rate 0.0-1.0 where:
-- 1.0 = Perfectly expresses this trait
-- 0.7 = Clearly present
-- 0.4 = Weakly present or inconsistent
-- 0.1 = Absent or contradicted
-- null = Not applicable to this scene (trait has no opportunity to manifest)
+const SCORING_PROMPT = `You are scoring the behavioral dimensions of a specific character in a roleplay response.
 
-IMPORTANT: Use null when a trait simply has no opportunity to appear in this response.
-A "romantic" trait during a combat scene, or an "aggressive" trait during a calm
-conversation, should be null -- NOT scored low. Only score 0.1 if the trait SHOULD
-be present given the scene but is absent or contradicted.
+CHARACTER TO SCORE: {{character_name}}
+You must score ONLY {{character_name}}'s direct actions, dialogue, and expressed behavior. IGNORE:
+- Actions, dialogue, or emotions of other characters (NPCs, side characters, bystanders)
+- Environmental narration, scene-setting, or atmospheric descriptions
+- The user's character's actions or dialogue
+- Implied or assumed behavior — only score what {{character_name}} explicitly does or says
 
-Consider the conversation context when scoring. A trait may be situationally suppressed (e.g. a cold character showing brief vulnerability in an extreme situation) -- score based on whether the expression fits the character, not just keyword presence.
+SCORING SCALE: Use ONLY these discrete values: 0.0, 0.25, 0.5, 0.75, 1.0, or null
+- null = {{character_name}} shows no behavior relevant to this dimension in this response
+- Do NOT score low just because the scene doesn't feature it — use null instead
+- Score what {{character_name}} DOES in this response, not what you expect from the character description
 
-CHARACTER CONTEXT (for reference -- this is how the character is supposed to behave):
+DIMENSIONS TO SCORE:
+{{dimensions_with_rubrics}}
+
+CHARACTER DESCRIPTION (use to interpret dimensions in this character's terms — score what {{character_name}} actually DOES, grounded in the rubric levels):
 {{character_description}}
 
 RECENT CONVERSATION (for context):
 {{recent_context}}
 
-TRAITS TO SCORE:
-{{traits_json}}
-
-RESPONSE TO SCORE:
+RESPONSE TO SCORE (focus ONLY on {{character_name}}'s behavior):
 {{response_text}}
 
-Respond with ONLY a JSON object mapping trait labels to scores (or null). No other text.
-Example: {"Cold and calculating": 0.82, "Distrustful": 0.45, "Romantic tenderness": null}`;
+First provide 1-sentence reasoning per scored dimension explaining which rubric level best matches {{character_name}}'s behavior. Then output the JSON scores. Skip dimensions scored null in reasoning.
 
-const CORRECTION_GENERATION_PROMPT = `You are writing a brief Author's Note to steer a roleplay AI back toward a character's core traits. The note will be injected into the conversation context.
+REASONING:
+- dimension_id: [brief explanation referencing specific behavior from the response]
+...
+
+SCORES (use actual dimension IDs as keys, e.g. "warmth", "stability", etc.):
+{"warmth": 0.5, "stability": null, "assertiveness": 0.75, ...}`;
+
+const CORRECTION_GENERATION_PROMPT = `You are writing a brief Author's Note to steer {{character_name}} back toward their intended personality. The note will be injected into the conversation context.
 
 RULES:
 - Write 2-4 sentences of BEHAVIORAL cues, not meta-instructions
@@ -100,32 +297,31 @@ RULES:
 - NEVER use words like "must", "should", "important", "critical", "remember"
 - NEVER use negation ("does not soften" -> instead show what she DOES instead)
 - Draw behavioral details from the character description below
-- IMPORTANT: Reinforce the DRIFTING traits below WITHOUT suppressing or contradicting the STABLE traits. The character should express ALL listed traits coherently.
 
 CHARACTER DESCRIPTION:
 {{description}}
 
-ALL CHARACTER TRAITS (maintain these holistically):
-{{all_traits}}
+CHARACTER'S DIMENSIONAL PROFILE (maintain holistically):
+{{all_dimensions}}
 
-TRAITS THAT ARE DRIFTING (focus reinforcement here):
-{{drifting_traits}}
+DIMENSIONS THAT ARE DRIFTING (focus correction here):
+{{drifting_dimensions}}
 
 RECENT CONVERSATION (last 3 exchanges):
 {{recent_context}}
 
-WHAT WENT WRONG (scoring evidence):
+DRIFT EVIDENCE:
 {{drift_evidence}}
 
 {{escalation_block}}
 
-Write the Author's Note. No preamble, no explanation -- just the behavioral cues.`;
+Write EXACTLY 2-4 sentences of behavioral cues. No preamble, no explanation, no meta-commentary. Plain text only — no markdown, no asterisks, no quotes.`;
 
-const BASELINE_GENERATION_PROMPT = `You are writing a brief, persistent Author's Note to anchor a roleplay AI character's core personality. This note will be present throughout the conversation to prevent gradual personality drift.
+const BASELINE_GENERATION_PROMPT = `You are writing a brief, persistent Author's Note to anchor {{character_name}}'s core personality. This note will be present throughout the conversation to prevent gradual personality drift.
 
 RULES:
 - Write 2-3 sentences of BEHAVIORAL cues that capture the character's essence
-- Focus on the most distinctive traits that make this character unique
+- Focus on the dimensions where this character deviates most from typical AI defaults (warm, agreeable, verbose, emotionally stable, cooperative)
 - Use present tense, narrative style ("she deflects", "he avoids eye contact")
 - Reference specific mannerisms, speech patterns, physical responses
 - Keep it subtle — this is background anchoring, not correction
@@ -135,8 +331,8 @@ RULES:
 CHARACTER DESCRIPTION:
 {{description}}
 
-KEY PERSONALITY TRAITS:
-{{traits_summary}}
+DIMENSIONAL PROFILE:
+{{dimensions_summary}}
 
 Write the Author's Note. No preamble, no explanation -- just the behavioral cues.`;
 
@@ -148,19 +344,19 @@ CARD RESILIENCE: {{card_score}}/100
 SESSION QUALITY: {{session_score}}/100
 MODEL COMPATIBILITY: {{model_score}}/100
 
-PER-TRAIT DATA:
-{{trait_breakdown}}
+PER-DIMENSION DATA:
+{{dimension_breakdown}}
 
 CORRECTIONS APPLIED:
 {{correction_history}}
 
 Provide:
-1. Which traits the card handles well vs. poorly and why
+1. Which dimensions the character maintains well vs. drifts on, and why
 2. Specific card revision suggestions (reference the character description)
 3. What the user could do differently in prompting/direction
-4. Model-specific observations (what {{model_name}} struggles with here)
+4. Model-specific observations (what {{model_name}} struggles with for this character)
 
-Be specific and actionable. Reference trait names and message numbers.`;
+Be specific and actionable. Reference dimension names and scores. Keep total output under 400 words.`;
 
 // ==================== DEFAULT SETTINGS ====================
 
@@ -181,17 +377,17 @@ const DEFAULT_SETTINGS = {
 
     // Drift detection
     drift_window: 8,
-    drift_threshold: 0.4,
-    drift_alert_threshold: 0.25,
+    drift_threshold: 0.20,         // Max allowed deviation from target (was 0.4 minimum score)
+    drift_alert_threshold: 0.35,   // Severe deviation threshold (was 0.25 minimum score)
 
     // Correction
     correction_enabled: true,
     correction_depth: 4,
-    correction_max_traits: 3,
+    correction_max_dimensions: 3,
     correction_patience: 2,
     correction_max_attempts: 2,
     correction_cooldown: 2,
-    recovery_margin: 0.1,
+    recovery_margin: 0.05,         // Adjusted for distance-based detection
     recovery_patience: 2,
 
     // Baseline Author's Note
@@ -204,25 +400,29 @@ const DEFAULT_SETTINGS = {
 
     // Report index (cross-session)
     report_index: [],
+
+    // Per-character dimension calibrations (persisted globally)
+    character_dimensions: {},
 };
 
 // ==================== EMPTY CHAT STATE ====================
 
 function create_empty_chat_state() {
     return {
-        traits: [],
-        trait_extraction_hash: null,
-        traits_manually_edited: false,
-        score_history: [],
-        drift_state: {},
+        data_version: MODULE_VERSION,      // Version of the scoring data format
+        dimensions: [],                    // Active dimensions with targets and contexts
+        calibration_hash: null,            // Hash of character description used for calibration
+        score_history: [],                 // Array of { message_id, scores: { dim_id: 0.0-1.0 } }
+        drift_state: {},                   // Per-dimension: { moving_avg, deviation, trend, correcting, severe, cusum_value }
         active_correction: { enabled: false },
-        ceiling_traits: [],
+        ceiling_dimensions: [],            // Dimension IDs that hit correction ceiling
         ceiling_model: null,
         cooldown_remaining: 0,
         recovery_cycles: 0,
         messages_scored: 0,
         corrections_injected: 0,
-        ever_corrected_traits: [],
+        ever_corrected_dimensions: [],     // Dimension IDs that were ever corrected
+        ever_cusum_triggered: [],          // Dimension IDs where CUSUM ever triggered drift
         last_scored_message_id: null,
         baseline_text: null,
         report: null,
@@ -231,17 +431,17 @@ function create_empty_chat_state() {
 
 // ==================== MODULE STATE ====================
 
-let CURRENT_TRAITS = [];
+let CURRENT_DIMENSIONS = [];       // Active dimensions for current character
 let CURRENT_DRIFT_STATE = {};
 let SCORING_IN_PROGRESS = false;
 let SCORING_QUEUE = [];
-let EXTRACTION_IN_PROGRESS = false;
+let CALIBRATION_IN_PROGRESS = false;
 let PLUGIN_AVAILABLE = null; // null = unknown, true = available, false = unavailable
 let PLUGIN_PROBE_TIMESTAMP = 0;
 const PLUGIN_PROBE_TTL_MS = 300000; // 5 minutes
 
-// Swipe re-score: message ID pending re-score after swipe
-let PENDING_SWIPE_RESCORE = null;
+// Swipe re-score: message IDs pending re-score after swipe (Set to handle rapid consecutive swipes)
+let PENDING_SWIPE_RESCORES = new Set();
 
 // Popout state
 let POPOUT_VISIBLE = false;
@@ -269,7 +469,7 @@ function mean(arr) {
 }
 
 function compute_variance(arr) {
-    if (!arr || arr.length === 0) return 0;
+    if (!arr || arr.length < 2) return null;
     const m = mean(arr);
     return arr.reduce((sum, v) => sum + (v - m) ** 2, 0) / arr.length;
 }
@@ -281,12 +481,48 @@ function compute_variance(arr) {
 function ema(arr, window_size) {
     if (!arr || arr.length === 0) return 0;
     if (arr.length === 1) return arr[0];
-    const alpha = 2 / (window_size + 1);
+    const safe_window = Math.max(1, window_size);
+    const alpha = 2 / (safe_window + 1);
     let result = arr[0];
     for (let i = 1; i < arr.length; i++) {
         result = alpha * arr[i] + (1 - alpha) * result;
     }
+    if (!Number.isFinite(result)) {
+        warn(`EMA produced non-finite result (${result}) from ${arr.length} scores, window=${window_size}. Falling back to mean.`);
+        return mean(arr);
+    }
     return result;
+}
+
+/** Valid discrete score levels for 5-point rubric scale. */
+const DISCRETE_SCALE = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+/**
+ * Snap a continuous value to the nearest discrete scale point.
+ */
+function snap_to_discrete(value) {
+    return DISCRETE_SCALE.reduce((best, v) => Math.abs(v - value) < Math.abs(best - value) ? v : best);
+}
+
+/**
+ * CUSUM (Cumulative Sum) for drift detection.
+ * Accumulates deviation from target beyond a noise allowance.
+ * Gradual persistent drift accumulates; random noise cancels out.
+ *
+ * Note: Uses Math.abs(x - target) intentionally to detect BOTH directional drift
+ * and oscillation/instability. A character that swings wildly between 0.2 and 0.8
+ * around a 0.5 target will accumulate CUSUM, which is desirable — instability in
+ * characterization is itself a form of drift that warrants correction.
+ */
+function cusum(scores, target, allowance, decision_threshold) {
+    if (!scores || scores.length === 0) return { cusum: 0, triggered: false };
+    const EPSILON = 1e-6;
+    let S = 0;
+    for (const x of scores) {
+        if (!Number.isFinite(x)) continue;
+        S = Math.max(0, S + (Math.abs(x - target) - allowance));
+    }
+    return { cusum: S, triggered: S >= (decision_threshold - EPSILON) };
 }
 
 /**
@@ -299,19 +535,34 @@ function escapeHtml(str) {
 }
 
 /**
- * Generate a stable slug ID from a trait label.
+ * Sanitize user/LLM-sourced text before embedding in analysis prompts.
+ * Defangs common prompt injection patterns without destroying content meaning.
+ * Applied to character descriptions, contexts, and other card-sourced data
+ * before template substitution into calibration/scoring/correction prompts.
+ */
+function sanitize_for_prompt(text) {
+    if (!text || typeof text !== 'string') return '';
+    return text
+        // Defang system/instruction injection attempts (brackets with underscores, dashes, etc.)
+        .replace(/\[SYSTEM[_\-\s]*[^\]]*\]/gi, '[system-note]')
+        .replace(/\b(INSTRUCTION|IMPORTANT\s+NOTE|ASSISTANT\s+NOTE)\s*:/gi, 'note:')
+        .replace(/\bSYSTEM\s*PROMPT\s*:/gi, 'system note:')
+        .replace(/\bIGNORE\s+(ALL\s+)?(PREVIOUS|ABOVE|PRIOR|FOLLOWING)\s+(INSTRUCTIONS?|PROMPTS?|RULES?|CONTEXT)/gi, '[filtered]')
+        .replace(/\b(BEGIN|START)\s+(NEW\s+)?(SYSTEM|INSTRUCTION|PROMPT)\b/gi, '[filtered]')
+        // Prevent code block injection that could break prompt structure
+        .replace(/```/g, "'''")
+        // Prevent JSON injection that could break structured output
+        .replace(/^\s*\{[\s\S]*"target"\s*:/m, '{ "note":')
+        // Limit length to prevent context overflow attacks (15,000 characters)
+        .substring(0, 15000);
+}
+
+/**
+ * Generate a stable slug ID from a label string.
  * "Cold and calculating" -> "cold_and_calculating"
  */
 function slugify(label) {
     return label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-}
-
-/**
- * Normalize a trait label for fuzzy matching.
- * Strips punctuation, collapses whitespace, lowercases.
- */
-function normalize_label(label) {
-    return label.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -334,6 +585,7 @@ function get_full_character_description() {
     if (!char) return '';
 
     const sections = [
+        ['Character Name', char.name || ''],
         ['Description', char.description],
         ['Personality', char.personality],
         ['Scenario', char.scenario],
@@ -346,6 +598,14 @@ function get_full_character_description() {
         .filter(([, text]) => text && text.trim().length > 0)
         .map(([label, text]) => `[${label}]\n${text.trim()}`)
         .join('\n\n');
+}
+
+/**
+ * Get the current character's name for prompt isolation.
+ */
+function get_character_name() {
+    const context = getContext();
+    return context.characters?.[context.characterId]?.name || 'the character';
 }
 
 // ==================== SETTINGS HELPERS ====================
@@ -661,7 +921,7 @@ async function test_connection() {
     }
 }
 
-// ==================== TRAIT EXTRACTION ====================
+// ==================== DIMENSION CALIBRATION ====================
 
 /**
  * Hash a character description for cache invalidation.
@@ -671,60 +931,135 @@ function hash_description(description) {
 }
 
 /**
- * Extract personality traits from a character description using the analysis backend.
+ * Build the dimensions list text for the calibration prompt.
  */
-async function extract_traits(character_description) {
+function build_dimensions_list_text() {
+    return DIMENSION_CATALOG.map(d =>
+        `- ${d.id}: ${d.label} — ${d.low_label} (0.0) to ${d.high_label} (1.0)\n  ${d.description}`
+    ).join('\n');
+}
+
+/**
+ * Get the character key for per-character dimension storage.
+ */
+function get_character_key() {
+    const context = getContext();
+    const char = context.characters?.[context.characterId];
+    if (!char) return null;
+    const name = char.name || 'unknown';
+    const desc_hash = hash_description(get_full_character_description());
+    return `${name}_${desc_hash}`;
+}
+
+/**
+ * Load pinned dimension calibration for the current character from global settings.
+ * Returns null if no calibration exists or card has changed.
+ */
+function load_pinned_calibration() {
+    const char_key = get_character_key();
+    if (!char_key) return null;
+
+    const all_calibrations = get_settings('character_dimensions') || {};
+    const pinned = all_calibrations[char_key];
+    if (!pinned || !pinned.dimensions) return null;
+
+    const current_hash = hash_description(get_full_character_description());
+    if (pinned.card_hash !== current_hash) {
+        log('Card changed since last calibration, will recalibrate');
+        return null;
+    }
+
+    return pinned.dimensions;
+}
+
+/**
+ * Save dimension calibration for the current character to global settings.
+ */
+function save_pinned_calibration(dimensions) {
+    const char_key = get_character_key();
+    if (!char_key) return;
+
+    const all_calibrations = get_settings('character_dimensions') || {};
+    all_calibrations[char_key] = {
+        dimensions: dimensions,
+        calibrated_at: Date.now(),
+        card_hash: hash_description(get_full_character_description()),
+    };
+    set_settings('character_dimensions', all_calibrations);
+}
+
+/**
+ * Resolve a raw calibration result (dimension ID → {target, context} or null)
+ * into an array of active dimension objects with full catalog data.
+ */
+function resolve_dimensions(raw_calibration) {
+    const active = [];
+
+    for (const dim of DIMENSION_CATALOG) {
+        const cal = raw_calibration[dim.id];
+        if (cal === null || cal === undefined) continue;
+
+        // Validate calibration entry structure
+        if (typeof cal !== 'object') {
+            warn(`Invalid calibration entry for "${dim.id}": expected object, got ${typeof cal}`);
+            continue;
+        }
+
+        const raw_target = cal.target;
+        if (raw_target === null || raw_target === undefined) continue; // Dimension intentionally skipped
+
+        const target = typeof raw_target === 'number' && Number.isFinite(raw_target)
+            ? Math.max(0, Math.min(1, raw_target))
+            : 0.5;
+
+        const context = typeof cal.context === 'string' ? cal.context.substring(0, 500) : '';
+
+        active.push({
+            ...dim,
+            target: target,
+            context: context,
+        });
+    }
+
+    return active;
+}
+
+/**
+ * Calibrate dimension targets for a character using the analysis backend.
+ * Returns array of active dimension objects with targets and contexts.
+ */
+async function calibrate_dimensions(character_description) {
     if (!character_description || character_description.trim().length === 0) {
-        warn('No character description provided for trait extraction');
+        warn('No character description provided for calibration');
         return [];
     }
 
-    const prompt = TRAIT_EXTRACTION_PROMPT.replace('{{description}}', character_description);
+    const prompt = CALIBRATION_PROMPT
+        .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(get_character_name()))
+        .replace('{{dimensions_list}}', build_dimensions_list_text())
+        .replace('{{description}}', sanitize_for_prompt(character_description));
 
     const messages = [
         { role: 'system', content: 'You are a character analyst. Respond only in valid JSON.' },
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 800);
+    const result = await analyze(messages, 1000);
 
-    if (!Array.isArray(result)) {
-        error('Trait extraction did not return an array:', result);
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        error('Calibration did not return a valid object:', result);
         return [];
     }
 
-    // Validate and post-process traits
-    const valid_dimensions = ['temperament', 'sociability', 'emotional', 'moral', 'trust', 'communication', 'romance'];
-    const processed = [];
+    const active = resolve_dimensions(result);
 
-    for (const trait of result) {
-        if (!trait.label || !trait.description) {
-            warn('Skipping trait with missing label/description:', trait);
-            continue;
-        }
-
-        const id = slugify(trait.label);
-        processed.push({
-            id: id,
-            label: trait.label,
-            description: trait.description,
-            dimension: valid_dimensions.includes(trait.dimension) ? trait.dimension : 'temperament',
-            polarity: trait.polarity === 'high' ? 'high' : 'low',
-            keywords: Array.isArray(trait.keywords) ? trait.keywords.slice(0, 5) : [],
-        });
+    if (active.length === 0) {
+        warn('Calibration returned no active dimensions');
+        return [];
     }
 
-    // Clamp to 3-7 traits
-    if (processed.length > 7) {
-        warn(`Extracted ${processed.length} traits, clamping to 7`);
-        return processed.slice(0, 7);
-    }
-    if (processed.length < 3 && processed.length > 0) {
-        warn(`Only extracted ${processed.length} traits (expected 3-7)`);
-    }
-
-    log(`Extracted ${processed.length} traits:`, processed.map(t => t.label));
-    return processed;
+    log(`Calibrated ${active.length} dimensions:`, active.map(d => `${d.id}=${d.target.toFixed(2)}`));
+    return active;
 }
 
 // ==================== SCORING ====================
@@ -811,9 +1146,9 @@ function is_ooc_message(message_text) {
 }
 
 /**
- * Score an AI response against the extracted traits.
+ * Score an AI response for position on each active dimension.
  */
-async function score_response(response_text, traits, char_description, message_index) {
+async function score_response(response_text, dimensions, char_description, message_index) {
     // Truncate long responses to avoid overflowing the analysis model's context
     const MAX_RESPONSE_LENGTH = 1500;
     let scoring_text = response_text || '';
@@ -824,10 +1159,16 @@ async function score_response(response_text, traits, char_description, message_i
         log(`Response truncated for scoring: ${response_text.length} -> ${scoring_text.length} chars`);
     }
 
-    const traits_json = traits.map(t => {
-        const kw = t.keywords?.length > 0 ? ` (keywords: ${t.keywords.join(', ')})` : '';
-        return `- "${t.label}": ${t.description}${kw}`;
-    }).join('\n');
+    const char_name = get_character_name();
+
+    // Build dimension descriptions with rubric anchors for the scoring prompt
+    const dimensions_with_rubrics = dimensions.map(d => {
+        const ctx = d.context ? `\n  Character context: ${d.context}` : '';
+        const rubric_text = Object.entries(d.rubric)
+            .map(([level, desc]) => `    ${level}: ${desc}`)
+            .join('\n');
+        return `- ${d.id}: ${d.low_label} (0.0) <-> ${d.high_label} (1.0)\n  ${d.scoring_guidance}${ctx}\n  Rubric:\n${rubric_text}`;
+    }).join('\n\n');
     const char_desc_text = char_description || '';
 
     // Build recent conversation context (last 6 messages before the scored response)
@@ -837,83 +1178,80 @@ async function score_response(response_text, traits, char_description, message_i
     const recent_context = recent_messages.length > 0
         ? recent_messages.map(m => {
             const text = m.mes || '';
-            // For long messages, include opening + closing to capture drift that manifests at the end
             let truncated;
             if (text.length > 500) {
                 truncated = text.substring(0, 300) + '\n[...]\n' + text.substring(text.length - 200);
             } else {
                 truncated = text;
             }
-            return `${m.is_user ? 'User' : 'Character'}: ${truncated}`;
+            const speaker = m.is_user ? (getContext().name1 || 'User') : char_name;
+            return `${speaker}: ${truncated}`;
         }).join('\n')
         : '(No prior messages available)';
 
     const prompt = SCORING_PROMPT
-        .replace('{{character_description}}', char_desc_text)
+        .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(char_name))
+        .replace('{{character_description}}', sanitize_for_prompt(char_desc_text))
         .replace('{{recent_context}}', recent_context)
-        .replace('{{traits_json}}', traits_json)
+        .replace('{{dimensions_with_rubrics}}', dimensions_with_rubrics)
         .replace('{{response_text}}', scoring_text);
 
     const messages = [
-        { role: 'system', content: 'You are a character analyst. Score trait adherence. Respond only in valid JSON.' },
+        { role: 'system', content: `You are a character analyst. Score only ${char_name}'s behavior on dimensional rubrics. Provide reasoning then JSON scores.` },
         { role: 'user', content: prompt },
     ];
 
-    const raw_scores = await analyze(messages, 300);
+    // expect_json=false to allow CoT reasoning before JSON output
+    const raw_text = await analyze(messages, 600, false);
+
+    // Extract JSON scores from the CoT + JSON response
+    const raw_scores = extract_json(raw_text);
 
     if (!raw_scores || typeof raw_scores !== 'object') {
-        error('Scoring did not return a valid object:', raw_scores);
+        error('Scoring did not return a valid object:', typeof raw_text === 'string' ? raw_text.substring(0, 200) : raw_text);
         return {};
     }
 
-    // Map label-keyed scores from the LLM to stable trait IDs
-    const id_scores = {};
-    const na_trait_ids = new Set();
-    const raw_keys = Object.keys(raw_scores);
+    // Store CoT reasoning for debugging (extract text before the JSON block)
+    let reasoning = null;
+    if (typeof raw_text === 'string') {
+        const json_start = raw_text.indexOf('{');
+        if (json_start > 0) {
+            reasoning = raw_text.substring(0, json_start).trim();
+        }
+    }
 
-    for (const trait of traits) {
-        let score = raw_scores[trait.label];
-        if (score === undefined) {
-            // Fallback 1: case-insensitive match
-            const ci_match = raw_keys.find(k => k.toLowerCase() === trait.label.toLowerCase());
-            if (ci_match) score = raw_scores[ci_match];
-        }
-        if (score === undefined) {
-            // Fallback 2: normalized (strips punctuation/whitespace)
-            const norm = normalize_label(trait.label);
-            const norm_match = raw_keys.find(k => normalize_label(k) === norm);
-            if (norm_match) score = raw_scores[norm_match];
-        }
-        if (score === undefined) {
-            // Fallback 3: substring (handles truncated/extended labels)
-            const norm = normalize_label(trait.label);
-            const sub_match = raw_keys.find(k => {
-                const nk = normalize_label(k);
-                return nk.includes(norm) || norm.includes(nk);
-            });
-            if (sub_match) score = raw_scores[sub_match];
-        }
-        // Handle null (N/A) scores -- trait not applicable to this scene
+    // Extract scores by dimension ID and snap to discrete scale
+    const id_scores = {};
+    const na_dims = new Set();
+
+    for (const dim of dimensions) {
+        const score = raw_scores[dim.id];
+
+        // Handle null (N/A) — dimension not observable in this scene
         if (score === null) {
-            na_trait_ids.add(trait.id);
+            na_dims.add(dim.id);
             continue;
         }
+
         if (score !== undefined) {
             const parsed = parseFloat(score);
             if (Number.isNaN(parsed)) {
-                warn(`Non-numeric score for "${trait.label}": ${JSON.stringify(score)} -- skipping`);
+                warn(`Non-numeric score for "${dim.id}": ${JSON.stringify(score)} -- skipping`);
                 continue;
             }
-            id_scores[trait.id] = Math.max(0, Math.min(1, parsed));
+            id_scores[dim.id] = snap_to_discrete(Math.max(0, Math.min(1, parsed)));
         }
     }
 
-    const unscored = traits.filter(t => id_scores[t.id] === undefined && !na_trait_ids.has(t.id));
+    const unscored = dimensions.filter(d => id_scores[d.id] === undefined && !na_dims.has(d.id));
     if (unscored.length > 0) {
-        warn(`${unscored.length}/${traits.length} traits unscored: ${unscored.map(t => t.label).join(', ')}`);
+        warn(`${unscored.length}/${dimensions.length} dimensions unscored: ${unscored.map(d => d.id).join(', ')}`);
     }
-    const scored_count = Object.keys(id_scores).length;
-    log(`${na_trait_ids.size} traits N/A, ${scored_count} traits scored`);
+    log(`${na_dims.size} dimensions N/A, ${Object.keys(id_scores).length} dimensions scored`);
+
+    // Attach reasoning to the return value for storage
+    id_scores._reasoning = reasoning;
 
     return id_scores;
 }
@@ -924,26 +1262,32 @@ async function score_response(response_text, traits, char_description, message_i
 function store_scores(message, message_index, scores) {
     const state = get_chat_state();
 
+    // Separate reasoning from scores before storing
+    const reasoning = scores._reasoning || null;
+    const clean_scores = { ...scores };
+    delete clean_scores._reasoning;
+
     // Per-message data
     if (!message.extra) message.extra = {};
     message.extra.driftguard = {
         scored: true,
-        scores: scores,
+        scores: clean_scores,
         correction_active: state.active_correction?.enabled || false,
+        reasoning: reasoning,
     };
 
     // Chat-level score history
     state.score_history.push({
         message_id: message_index,
         timestamp: Date.now(),
-        scores: scores,
+        scores: clean_scores,
         content_hash: getStringHash((message.mes || '').substring(0, 200)),
     });
 
-    // Cap score history to prevent unbounded growth
+    // Cap score history to prevent unbounded growth (immutable to avoid race conditions)
     const MAX_SCORE_HISTORY = 200;
     if (state.score_history.length > MAX_SCORE_HISTORY) {
-        state.score_history.splice(0, state.score_history.length - MAX_SCORE_HISTORY);
+        state.score_history = state.score_history.slice(-MAX_SCORE_HISTORY);
     }
 
     state.last_scored_message_id = message_index;
@@ -953,68 +1297,108 @@ function store_scores(message, message_index, scores) {
 // ==================== DRIFT DETECTION ====================
 
 /**
- * Compute drift state using a simple moving average over recent scored messages.
+ * Compute drift state for each dimension using distance-from-target.
+ * Drift is bidirectional: a character can drift in either direction on any dimension.
  */
-function update_drift_state(traits, score_history) {
+function update_drift_state(dimensions, score_history) {
     const drift_window = get_settings('drift_window');
-    const threshold = get_settings('drift_threshold');
-    const alert_threshold = get_settings('drift_alert_threshold');
+    const threshold = get_settings('drift_threshold');        // Max allowed deviation from target
+    const alert_threshold = get_settings('drift_alert_threshold');  // Severe deviation
     const drift_state = {};
 
-    for (const trait of traits) {
+    // CUSUM parameters derived from existing settings.
+    // Allowance (slack): half the threshold, floored at 0.125 (one half-step on the discrete scale).
+    //   This means deviations smaller than the allowance are treated as noise and don't accumulate.
+    // Decision threshold: proportional to allowance * window. The 0.8 multiplier means ~80% of the
+    //   window must show above-allowance deviation to trigger. With defaults (threshold=0.20, window=8):
+    //   allowance=0.10, decision=0.64 → requires ~4-5 scores deviating by 0.25 to trigger.
+    // Severe uses a lower window multiplier (0.5) to trigger faster for high deviations.
+    const allowance = Math.max(threshold * 0.5, 0.125);
+    const decision_threshold = allowance * drift_window * 0.8;
+    const severe_allowance = Math.max(alert_threshold * 0.5, 0.125);
+    const severe_decision = severe_allowance * drift_window * 0.5;
+
+    for (const dim of dimensions) {
+        // EMA window: last drift_window scores (for UI display)
         const recent_scores = score_history
             .slice(-drift_window)
-            .map(entry => entry.scores[trait.id])
+            .map(entry => entry.scores[dim.id])
+            .filter(s => s !== undefined);
+
+        // CUSUM window: broader context (last drift_window * 2 scores)
+        const cusum_scores = score_history
+            .slice(-(drift_window * 2))
+            .map(entry => entry.scores[dim.id])
             .filter(s => s !== undefined);
 
         if (recent_scores.length === 0) {
-            drift_state[trait.id] = { moving_avg: null, trend: 'no_data', correcting: false, severe: false };
+            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'no_data', correcting: false, severe: false, cusum_value: 0 };
             continue;
         }
 
+        // EMA for UI display
         const moving_avg = ema(recent_scores, drift_window);
 
+        // Guard against NaN/Infinity propagation from corrupt scores
+        if (!Number.isFinite(moving_avg)) {
+            warn(`Non-finite moving average for ${dim.id}: ${moving_avg} from ${recent_scores.length} scores`);
+            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'error', correcting: false, severe: false, cusum_value: 0 };
+            continue;
+        }
+
+        const deviation = Math.abs(moving_avg - dim.target);
+
         if (recent_scores.length < MIN_SCORES_FOR_CORRECTION) {
-            drift_state[trait.id] = {
+            drift_state[dim.id] = {
                 moving_avg,
+                deviation,
                 trend: 'insufficient_data',
-                correcting: false,   // Never trigger correction with insufficient data
+                correcting: false,
                 severe: false,
+                cusum_value: 0,
             };
             continue;
         }
 
-        // Simple trend: compare first half avg to second half avg
-        const mid = Math.floor(recent_scores.length / 2);
-        const first_half = mean(recent_scores.slice(0, mid));
-        const second_half = mean(recent_scores.slice(mid));
-        const trend = second_half < first_half - 0.05 ? 'declining'
-            : second_half > first_half + 0.05 ? 'improving'
+        // Trend: are recent scores moving toward or away from the target?
+        // Use ceil to ensure the first half is >= the second half in size, avoiding asymmetric comparison
+        const mid = Math.ceil(recent_scores.length / 2);
+        const first_half_dev = Math.abs(mean(recent_scores.slice(0, mid)) - dim.target);
+        const second_half_dev = Math.abs(mean(recent_scores.slice(mid)) - dim.target);
+        const trend = second_half_dev > first_half_dev + 0.03 ? 'drifting'
+            : second_half_dev < first_half_dev - 0.03 ? 'correcting'
             : 'stable';
 
-        const needs_correction = moving_avg < threshold;
-        const severe = moving_avg < alert_threshold;
+        // CUSUM for drift trigger decisions
+        const cusum_result = cusum(cusum_scores, dim.target, allowance, decision_threshold);
+        const severe_result = cusum(cusum_scores, dim.target, severe_allowance, severe_decision);
 
-        drift_state[trait.id] = { moving_avg, trend, correcting: needs_correction, severe };
+        drift_state[dim.id] = {
+            moving_avg,
+            deviation,
+            trend,
+            correcting: cusum_result.triggered,
+            severe: severe_result.triggered,
+            cusum_value: cusum_result.cusum,
+        };
     }
 
     return drift_state;
 }
 
 /**
- * Compute per-trait averages using only scores recorded AFTER a correction was injected.
- * Used for evaluating correction effectiveness without dilution from pre-correction low scores.
- * Falls back to null for traits with no post-correction data.
+ * Compute per-dimension averages using only scores recorded AFTER a correction was injected.
+ * Used for evaluating correction effectiveness.
  */
-function compute_post_correction_averages(trait_ids, score_history, since_message) {
+function compute_post_correction_averages(dim_ids, score_history, since_message) {
     const averages = {};
-    for (const trait_id of trait_ids) {
+    for (const dim_id of dim_ids) {
         const post_scores = score_history
             .filter(entry => entry.message_id > since_message)
-            .map(entry => entry.scores[trait_id])
+            .map(entry => entry.scores[dim_id])
             .filter(s => s !== undefined);
 
-        averages[trait_id] = post_scores.length > 0 ? mean(post_scores) : null;
+        averages[dim_id] = post_scores.length > 0 ? mean(post_scores) : null;
     }
     return averages;
 }
@@ -1023,67 +1407,77 @@ function compute_post_correction_averages(trait_ids, score_history, since_messag
 
 /**
  * Generate a behavioral correction using the analysis backend.
+ * drifting_dims: array of { dim_id, moving_avg, deviation, trend } for dimensions needing correction
+ * all_dimensions: full array of active dimension objects with targets
  */
-async function generate_correction(drifting_traits, all_traits, char_description, chat, scoring_evidence, escalation_context) {
-    const max = get_settings('correction_max_traits');
-    const worst = [...drifting_traits]
-        .sort((a, b) => a.moving_avg - b.moving_avg)
+async function generate_correction(drifting_dims, all_dimensions, char_description, chat, scoring_evidence, escalation_context) {
+    const max = get_settings('correction_max_dimensions');
+    const worst = [...drifting_dims]
+        .sort((a, b) => b.deviation - a.deviation)  // Sort by worst deviation
         .slice(0, max);
 
-    const trait_descriptions = worst.map(dt => {
-        const trait = all_traits.find(t => t.id === dt.trait_id) || all_traits.find(t => t.label === dt.label);
-        const label = trait?.label || dt.label || dt.trait_id;
-        const desc = trait?.description || 'No description';
-        return `- ${label} (${desc}) -- current score: ${(dt.moving_avg || 0).toFixed(2)}, trend: ${dt.trend || 'unknown'}`;
-    }).join('\n');
+    // Describe drifting dimensions with direction
+    const drifting_descriptions = worst.map(dd => {
+        const dim = all_dimensions.find(d => d.id === dd.dim_id);
+        if (!dim) return '';
+        const direction = dd.moving_avg > dim.target ? `too high (toward ${dim.high_label})` : `too low (toward ${dim.low_label})`;
+        const ctx = dim.context ? ` — ${dim.context}` : '';
+        return `- ${dim.label}: target=${dim.target.toFixed(2)}, current=${(dd.moving_avg || 0).toFixed(2)} (${direction})${ctx}`;
+    }).filter(Boolean).join('\n');
 
+    const char_name = get_character_name();
     const recent_context = (chat || [])
         .slice(-6)
-        .map(m => `${m.is_user ? 'User' : 'Character'}: ${(m.mes || '').substring(0, 300)}`)
+        .map(m => {
+            const speaker = m.is_user ? (getContext().name1 || 'User') : char_name;
+            return `${speaker}: ${(m.mes || '').substring(0, 300)}`;
+        })
         .join('\n');
 
     const window_size = get_settings('drift_window');
     const state = get_chat_state();
-    const evidence = worst.map(dt => {
-        const trait_id = dt.trait_id || all_traits.find(t => t.label === dt.label)?.id;
+    const evidence = worst.map(dd => {
+        const dim = all_dimensions.find(d => d.id === dd.dim_id);
         const window_scores = (state.score_history || [])
             .slice(-window_size)
-            .map(s => s.scores[trait_id])
-            .filter(s => s !== undefined);
-        const first_in_window = window_scores.length > 0 ? window_scores[0].toFixed(2) : '?';
-        const label = dt.label || trait_id;
-        return `${label}: dropped from ~${first_in_window} to ${(dt.moving_avg || 0).toFixed(2)} over ${window_scores.length} scored messages`;
+            .map(s => s.scores?.[dd.dim_id])
+            .filter(s => s !== undefined && Number.isFinite(s));
+        const first_in_window = window_scores.length > 0 && Number.isFinite(window_scores[0]) ? window_scores[0].toFixed(2) : '?';
+        const label = dim?.label || dd.dim_id;
+        return `${label}: moved from ~${first_in_window} to ${(dd.moving_avg || 0).toFixed(2)} (target: ${dim?.target?.toFixed(2) || '?'}) over ${window_scores.length} scored messages`;
     }).join('\n');
 
     let escalation_block = '';
     if (escalation_context) {
-        const score_before = escalation_context.score_at_correction !== undefined
-            ? escalation_context.score_at_correction.toFixed(2) : '?';
-        const score_after = escalation_context.score_after !== undefined
-            ? escalation_context.score_after.toFixed(2) : '?';
-        const delta = (escalation_context.score_after !== undefined && escalation_context.score_at_correction !== undefined)
-            ? (escalation_context.score_after > escalation_context.score_at_correction + 0.02 ? 'slight improvement'
-                : escalation_context.score_after < escalation_context.score_at_correction - 0.02 ? 'worsened'
+        const dev_before = escalation_context.deviation_at_correction !== undefined
+            ? escalation_context.deviation_at_correction.toFixed(2) : '?';
+        const dev_after = escalation_context.deviation_after !== undefined
+            ? escalation_context.deviation_after.toFixed(2) : '?';
+        const delta = (escalation_context.deviation_after !== undefined && escalation_context.deviation_at_correction !== undefined)
+            ? (escalation_context.deviation_after < escalation_context.deviation_at_correction - 0.02 ? 'slight improvement'
+                : escalation_context.deviation_after > escalation_context.deviation_at_correction + 0.02 ? 'worsened'
                 : 'no change')
             : 'unknown';
         escalation_block = `IMPORTANT: A previous correction (attempt ${escalation_context.attempt || 1} of ${escalation_context.patience || '?'}) was already attempted but the character continued to drift.
-The previous correction scored ${score_before} at injection. After ${escalation_context.attempt || 1} scored messages, the worst drifting trait is now at ${score_after} (${delta}).
+Deviation was ${dev_before} at injection. After ${escalation_context.attempt || 1} scored messages, deviation is now ${dev_after} (${delta}).
 The previous correction was:
 ${escalation_context.previous_text}
 Generate a DIFFERENT correction with stronger behavioral anchoring. Use more specific, concrete behavioral cues. Include physical response patterns and speech mannerisms.`;
     }
 
-    // Build full trait list for context (so correction doesn't suppress stable traits)
-    const all_traits_text = all_traits.map(t => {
-        const drift_info = drifting_traits.find(dt => dt.trait_id === t.id || dt.label === t.label);
-        const status = drift_info ? 'DRIFTING' : 'STABLE';
-        return `- ${t.label} (${t.description}) [${status}]`;
+    // Build full dimensional profile for context
+    const all_dims_text = all_dimensions.map(d => {
+        const drift_info = drifting_dims.find(dd => dd.dim_id === d.id);
+        const status = drift_info ? 'DRIFTING' : 'ON TARGET';
+        const ctx = d.context ? ` — ${d.context}` : '';
+        return `- ${d.label}: ${d.low_label} (0.0) ↔ ${d.high_label} (1.0), target=${d.target.toFixed(2)}${ctx} [${status}]`;
     }).join('\n');
 
     const prompt = CORRECTION_GENERATION_PROMPT
-        .replace('{{description}}', char_description || '')
-        .replace('{{all_traits}}', all_traits_text)
-        .replace('{{drifting_traits}}', trait_descriptions)
+        .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(char_name))
+        .replace('{{description}}', sanitize_for_prompt(char_description || ''))
+        .replace('{{all_dimensions}}', all_dims_text)
+        .replace('{{drifting_dimensions}}', drifting_descriptions)
         .replace('{{recent_context}}', recent_context)
         .replace('{{drift_evidence}}', evidence)
         .replace('{{escalation_block}}', escalation_block);
@@ -1103,6 +1497,10 @@ Generate a DIFFERENT correction with stronger behavioral anchoring. Use more spe
 function inject_correction(correction_text) {
     const configured_depth = get_settings('correction_depth');
     const context = getContext();
+    if (!context.chat || context.characterId === undefined) {
+        warn('Cannot inject correction: no active chat context');
+        return;
+    }
     const chat_length = context.chat?.length || 0;
     const depth = Math.min(configured_depth, Math.max(1, Math.floor(chat_length / 2)));
 
@@ -1120,27 +1518,48 @@ function inject_correction(correction_text) {
 
 /**
  * Remove the current correction injection.
+ * Optionally resets state.active_correction if a state object is provided,
+ * ensuring the prompt injection and state are always cleared atomically.
+ * @param {object} [state] - If provided, also resets state.active_correction
  */
-function clear_correction() {
+function clear_correction(state) {
     const context = getContext();
     context.setExtensionPrompt('driftguard_correction', '', extension_prompt_types.IN_PROMPT, 0);
+    if (state) {
+        state.active_correction = { enabled: false };
+    }
     log('Correction cleared');
 }
 
 // ==================== BASELINE AUTHOR'S NOTE ====================
 
 /**
- * Generate a lightweight baseline Author's Note from extracted traits.
+ * Generate a lightweight baseline Author's Note from calibrated dimensions.
  * This provides continuous behavioral anchoring to prevent drift before it starts.
  */
-async function generate_baseline(traits, char_description) {
-    if (!traits || traits.length === 0) return null;
+async function generate_baseline(dimensions, char_description) {
+    if (!dimensions || dimensions.length === 0) return null;
 
-    const traits_summary = traits.map(t => `- ${t.label}: ${t.description}`).join('\n');
+    // Sort dimensions by deviation from AI defaults (largest first) so the baseline
+    // prompt naturally focuses on the most atypical dimensions for this character
+    const sorted_dims = [...dimensions].sort((a, b) => {
+        const dev_a = Math.abs(a.target - (a.ai_default ?? 0.5));
+        const dev_b = Math.abs(b.target - (b.ai_default ?? 0.5));
+        return dev_b - dev_a;
+    });
+    const dimensions_summary = sorted_dims.map(d => {
+        const pos = d.target <= 0.3 ? d.low_label : d.target >= 0.7 ? d.high_label : `between ${d.low_label} and ${d.high_label}`;
+        const ai_def = d.ai_default ?? 0.5;
+        const deviation = Math.abs(d.target - ai_def);
+        const ctx = d.context ? ` — ${d.context}` : '';
+        const deviation_note = deviation >= 0.2 ? ` [DEVIATES from AI default ${ai_def.toFixed(2)}]` : '';
+        return `- ${d.label}: ${pos} (target: ${d.target.toFixed(2)})${deviation_note}${ctx}`;
+    }).join('\n');
 
     const prompt = BASELINE_GENERATION_PROMPT
-        .replace('{{description}}', char_description || '')
-        .replace('{{traits_summary}}', traits_summary);
+        .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(get_character_name()))
+        .replace('{{description}}', sanitize_for_prompt(char_description || ''))
+        .replace('{{dimensions_summary}}', dimensions_summary);
 
     const messages = [
         { role: 'system', content: 'You write brief behavioral Author\'s Notes for roleplay character anchoring. Output ONLY the note text.' },
@@ -1193,7 +1612,7 @@ globalThis.driftguard_intercept_generate = async function (chat, contextSize, ab
     if (!get_settings('enabled')) return;
 
     const state = get_chat_state();
-    if (!state.traits || state.traits.length === 0) return;
+    if (!state.dimensions || state.dimensions.length === 0) return;
 
     const has_active_correction = state.active_correction?.enabled && state.active_correction?.injection_text;
 
@@ -1225,19 +1644,19 @@ globalThis.driftguard_intercept_generate = async function (chat, contextSize, ab
  */
 async function score_and_process_message(message_index, { force = false } = {}) {
     const state = get_chat_state();
-    if (!state.traits || state.traits.length === 0) {
-        if (force) toastr.warning('No traits extracted yet.', MODULE_NAME_FANCY);
+    if (!state.dimensions || state.dimensions.length === 0) {
+        if (force) toastr.warning('No dimensions calibrated yet.', MODULE_NAME_FANCY);
         return;
     }
 
     // Clear ceiling if model has changed since ceiling was set
-    if (state.ceiling_traits?.length > 0 && state.ceiling_model) {
+    if (state.ceiling_dimensions?.length > 0 && state.ceiling_model) {
         const current_model = get_current_model_id();
         if (current_model !== state.ceiling_model && current_model !== 'unknown') {
-            const cleared_labels = state.ceiling_traits.map(id =>
-                state.traits.find(t => t.id === id)?.label || id);
+            const cleared_labels = state.ceiling_dimensions.map(id =>
+                state.dimensions.find(d => d.id === id)?.label || id);
             const old_model = state.ceiling_model;
-            state.ceiling_traits = [];
+            state.ceiling_dimensions = [];
             state.ceiling_model = null;
             save_chat_state(state);
             toastr.info(
@@ -1254,29 +1673,27 @@ async function score_and_process_message(message_index, { force = false } = {}) 
         return;
     }
 
-    // Skip greeting messages (card author's writing, not model output)
     if (is_greeting_message(message, message_index)) {
         if (force) toastr.warning('Cannot score the greeting message (card author content).', MODULE_NAME_FANCY);
         else log(`Skipping greeting message #${message_index} (card author content)`);
         return;
     }
 
-    // Skip OOC messages (not character behavior)
     if (is_ooc_message(message.mes)) {
         if (force) toastr.warning('Cannot score an OOC message.', MODULE_NAME_FANCY);
         else log(`Skipping OOC message #${message_index}`);
         return;
     }
 
-    // Check if this message should be scored (skip for forced/manual scoring)
     if (!force && !should_score_message()) return;
 
     SCORING_IN_PROGRESS = true;
     try {
         const char_desc = get_full_character_description();
-        const scores = await score_response(message.mes, state.traits, char_desc, message_index);
+        const scores = await score_response(message.mes, state.dimensions, char_desc, message_index);
 
-        if (Object.keys(scores).length === 0) {
+        const score_keys = Object.keys(scores).filter(k => k !== '_reasoning');
+        if (score_keys.length === 0) {
             warn('Scoring returned empty results, skipping this cycle');
             if (force) toastr.warning('Scoring returned empty results.', MODULE_NAME_FANCY);
             return;
@@ -1285,22 +1702,22 @@ async function score_and_process_message(message_index, { force = false } = {}) 
         store_scores(message, message_index, scores);
         state.messages_scored++;
 
-        // Warn user about persistently unscored traits
+        // Warn user about persistently unscored dimensions
         const consecutive_threshold = 3;
-        for (const trait of state.traits) {
+        for (const dim of state.dimensions) {
             const recent = state.score_history.slice(-consecutive_threshold);
             const all_missing = recent.length >= consecutive_threshold &&
-                recent.every(entry => entry.scores[trait.id] === undefined);
+                recent.every(entry => entry.scores[dim.id] === undefined);
             if (all_missing) {
                 toastr.warning(
-                    `"${trait.label}" has not been scored in the last ${consecutive_threshold} cycles. The scorer may not recognize this trait label.`,
+                    `"${dim.label}" has not been scored in the last ${consecutive_threshold} cycles.`,
                     MODULE_NAME_FANCY,
                     { preventDuplicates: true },
                 );
             }
         }
 
-        const drift = update_drift_state(state.traits, state.score_history);
+        const drift = update_drift_state(state.dimensions, state.score_history);
         save_drift_state(drift);
         update_dashboard();
         update_message_badges();
@@ -1310,13 +1727,19 @@ async function score_and_process_message(message_index, { force = false } = {}) 
             return;
         }
 
-        // Filter out ceiling-reached traits
+        // Filter out ceiling-reached dimensions; drifting = CUSUM-triggered dimensions
+        const threshold = get_settings('drift_threshold');
         const drifting = Object.entries(drift)
-            .filter(([trait_id, d]) => d.correcting && !(state.ceiling_traits || []).includes(trait_id))
-            .map(([trait_id, d]) => ({ trait_id, ...d }));
+            .filter(([dim_id, d]) => d.correcting && !(state.ceiling_dimensions || []).includes(dim_id))
+            .map(([dim_id, d]) => ({ dim_id, ...d }));
+
+        // Track which dimensions have ever had CUSUM trigger (for accurate report verdicts)
+        if (drifting.length > 0) {
+            const cusum_triggered_ids = drifting.map(d => d.dim_id);
+            state.ever_cusum_triggered = [...new Set([...(state.ever_cusum_triggered || []), ...cusum_triggered_ids])];
+        }
 
         if (drifting.length > 0) {
-            // Check cooldown
             if (state.cooldown_remaining > 0) {
                 state.cooldown_remaining--;
                 save_chat_state(state);
@@ -1327,225 +1750,209 @@ async function score_and_process_message(message_index, { force = false } = {}) 
 
             if (!correction?.enabled) {
                 // === NEW DRIFT: Generate first correction ===
-                const drifting_with_labels = drifting.map(d => ({
-                    ...d,
-                    label: state.traits.find(t => t.id === d.trait_id)?.label || d.trait_id,
-                }));
-                const text = await generate_correction(drifting_with_labels, state.traits, char_desc, chat, null, null);
+                const text = await generate_correction(drifting, state.dimensions, char_desc, chat, null, null);
                 inject_correction(text);
                 state.active_correction = {
                     enabled: true,
-                    trait_ids: drifting.map(d => d.trait_id),
+                    dim_ids: drifting.map(d => d.dim_id),
                     injection_text: text,
                     since_message: message_index,
                     attempt: 1,
                     scores_since_correction: 0,
-                    score_at_correction: Math.min(...drifting.map(d => d.moving_avg || 0)),
+                    deviation_at_correction: Math.max(...drifting.map(d => d.deviation || 0)),
                 };
                 state.corrections_injected++;
-                state.ever_corrected_traits = [...new Set([...(state.ever_corrected_traits || []), ...drifting.map(d => d.trait_id)])];
+                state.ever_corrected_dimensions = [...new Set([...(state.ever_corrected_dimensions || []), ...drifting.map(d => d.dim_id)])];
 
                 if (get_settings('show_toast_on_drift')) {
-                    const trait_labels = drifting_with_labels.map(d => d.label);
+                    const dim_labels = drifting.map(d => state.dimensions.find(dim => dim.id === d.dim_id)?.label || d.dim_id);
                     const has_severe = drifting.some(d => d.severe);
                     if (has_severe) {
-                        toastr.error(`Severe drift: ${trait_labels.join(', ')}`, MODULE_NAME_FANCY);
+                        toastr.error(`Severe drift: ${dim_labels.join(', ')}`, MODULE_NAME_FANCY);
                     } else {
-                        toastr.warning(`Drift detected: ${trait_labels.join(', ')}`, MODULE_NAME_FANCY);
+                        toastr.warning(`Drift detected: ${dim_labels.join(', ')}`, MODULE_NAME_FANCY);
                     }
                 }
 
             } else {
                 // === EXISTING CORRECTION: Check if working ===
-                const corrected_trait_scored = correction.trait_ids.some(
+                const corrected_dim_scored = correction.dim_ids.some(
                     id => scores[id] !== undefined
                 );
-                if (corrected_trait_scored) {
+                if (corrected_dim_scored) {
                     correction.scores_since_correction++;
                 }
                 const patience = get_settings('correction_patience');
                 const max_attempts = get_settings('correction_max_attempts');
 
                 if (correction.scores_since_correction >= patience) {
-                    // Only check improvement for the CORRECTED traits
-                    // Use post-correction averages to avoid dilution from pre-correction low scores
+                    // Check deviation for corrected dimensions using post-correction averages
                     const recovery_margin = get_settings('recovery_margin');
-                    const recovery_threshold = get_settings('drift_threshold') + recovery_margin;
+                    const recovery_threshold = threshold - recovery_margin;  // Lower deviation = better
                     const post_avgs = compute_post_correction_averages(
-                        correction.trait_ids, state.score_history, correction.since_message,
+                        correction.dim_ids, state.score_history, correction.since_message,
                     );
-                    const corrected_drifting = correction.trait_ids
-                        .map(trait_id => {
-                            const effective_avg = post_avgs[trait_id] ?? drift[trait_id]?.moving_avg ?? null;
-                            return { trait_id, ...(drift[trait_id] || {}), moving_avg: effective_avg };
+                    const corrected_still_drifting = correction.dim_ids
+                        .map(dim_id => {
+                            const dim = state.dimensions.find(d => d.id === dim_id);
+                            const effective_avg = post_avgs[dim_id] ?? drift[dim_id]?.moving_avg ?? null;
+                            const dev = effective_avg !== null && dim ? Math.abs(effective_avg - dim.target) : null;
+                            return { dim_id, deviation: dev, moving_avg: effective_avg };
                         })
-                        .filter(d => d.moving_avg === null || d.moving_avg < recovery_threshold);
+                        .filter(d => d.deviation === null || d.deviation > recovery_threshold);
 
-                    if (corrected_drifting.length === 0) {
-                        // All corrected traits recovered above recovery threshold
+                    if (corrected_still_drifting.length === 0) {
+                        // All corrected dimensions recovered
                         clear_correction();
-                        const still_drifting = drifting.filter(d => !correction.trait_ids.includes(d.trait_id));
+                        const still_drifting = drifting.filter(d => !correction.dim_ids.includes(d.dim_id));
                         if (still_drifting.length > 0) {
-                            // Immediately start correction for remaining traits (no cooldown)
-                            const labeled = still_drifting.map(d => ({
-                                ...d, label: state.traits.find(t => t.id === d.trait_id)?.label || d.trait_id,
-                            }));
-                            const text = await generate_correction(labeled, state.traits, char_desc, chat, null, null);
+                            const text = await generate_correction(still_drifting, state.dimensions, char_desc, chat, null, null);
                             inject_correction(text);
                             state.active_correction = {
-                                enabled: true, trait_ids: still_drifting.map(d => d.trait_id),
+                                enabled: true, dim_ids: still_drifting.map(d => d.dim_id),
                                 injection_text: text, since_message: message_index, attempt: 1,
                                 scores_since_correction: 0,
-                                score_at_correction: Math.min(...still_drifting.map(d => d.moving_avg || 0)),
+                                deviation_at_correction: Math.max(...still_drifting.map(d => d.deviation || 0)),
                             };
                             state.corrections_injected++;
-                            state.ever_corrected_traits = [...new Set([...(state.ever_corrected_traits || []), ...still_drifting.map(d => d.trait_id)])];
-                            toastr.success('Previous correction worked. New correction for remaining traits.', MODULE_NAME_FANCY);
+                            state.ever_corrected_dimensions = [...new Set([...(state.ever_corrected_dimensions || []), ...still_drifting.map(d => d.dim_id)])];
+                            toastr.success('Previous correction worked. New correction for remaining dimensions.', MODULE_NAME_FANCY);
                         } else {
                             state.active_correction = { enabled: false };
                             state.cooldown_remaining = get_settings('correction_cooldown');
-                            toastr.success('Corrected traits stabilized', MODULE_NAME_FANCY);
+                            toastr.success('Dimensions stabilized', MODULE_NAME_FANCY);
                         }
                     } else {
-                        const current_worst = Math.min(...corrected_drifting.map(d => d.moving_avg || 0));
-                        const worsened = current_worst < correction.score_at_correction - 0.05;
-                        const improved = current_worst > correction.score_at_correction + 0.02;
+                        const current_worst_dev = Math.max(...corrected_still_drifting.map(d => d.deviation || 0));
+                        const worsened = current_worst_dev > correction.deviation_at_correction + 0.05;
+                        const improved = current_worst_dev < correction.deviation_at_correction - 0.02;
 
                         if (worsened && correction.attempt < max_attempts) {
-                            // === FAST-PATH ESCALATE: Score actively declining ===
+                            // Escalate: target the originally-corrected dimensions that are still drifting,
+                            // not whatever CUSUM currently flags (which may be a different set)
+                            const escalation_targets = corrected_still_drifting.map(d => {
+                                const full = drifting.find(dd => dd.dim_id === d.dim_id);
+                                return full || d;
+                            });
                             const escalation = {
                                 previous_text: correction.injection_text,
-                                score_at_correction: correction.score_at_correction,
-                                score_after: current_worst,
+                                deviation_at_correction: correction.deviation_at_correction,
+                                deviation_after: current_worst_dev,
                                 attempt: correction.attempt,
                                 patience: patience,
                             };
-                            const drifting_labeled = drifting.map(d => ({
-                                ...d,
-                                label: state.traits.find(t => t.id === d.trait_id)?.label || d.trait_id,
-                            }));
-                            const text = await generate_correction(drifting_labeled, state.traits, char_desc, chat, null, escalation);
+                            const text = await generate_correction(escalation_targets, state.dimensions, char_desc, chat, null, escalation);
                             inject_correction(text);
                             correction.injection_text = text;
                             correction.attempt++;
                             correction.scores_since_correction = 0;
-                            correction.score_at_correction = current_worst;
+                            correction.deviation_at_correction = current_worst_dev;
                             state.corrections_injected++;
-                            toastr.warning(`Score worsening — correction regenerated (attempt ${correction.attempt})`, MODULE_NAME_FANCY);
+                            toastr.warning(`Deviation worsening — correction regenerated (attempt ${correction.attempt})`, MODULE_NAME_FANCY);
                         } else if (improved) {
-                            // Working -- reset counter, keep current correction
                             correction.scores_since_correction = 0;
-                            correction.score_at_correction = current_worst;
+                            correction.deviation_at_correction = current_worst_dev;
                         } else if (correction.attempt < max_attempts) {
-                            // === ESCALATE: Regenerate with escalation context ===
+                            // Stagnant: target the originally-corrected dimensions that are still drifting
+                            const escalation_targets = corrected_still_drifting.map(d => {
+                                const full = drifting.find(dd => dd.dim_id === d.dim_id);
+                                return full || d;
+                            });
                             const escalation = {
                                 previous_text: correction.injection_text,
-                                score_at_correction: correction.score_at_correction,
-                                score_after: current_worst,
+                                deviation_at_correction: correction.deviation_at_correction,
+                                deviation_after: current_worst_dev,
                                 attempt: correction.attempt,
                                 patience: patience,
                             };
-                            const drifting_labeled = drifting.map(d => ({
-                                ...d,
-                                label: state.traits.find(t => t.id === d.trait_id)?.label || d.trait_id,
-                            }));
-                            const text = await generate_correction(drifting_labeled, state.traits, char_desc, chat, null, escalation);
+                            const text = await generate_correction(escalation_targets, state.dimensions, char_desc, chat, null, escalation);
                             inject_correction(text);
                             correction.injection_text = text;
                             correction.attempt++;
                             correction.scores_since_correction = 0;
-                            correction.score_at_correction = current_worst;
+                            correction.deviation_at_correction = current_worst_dev;
                             state.corrections_injected++;
                             toastr.warning(`Correction regenerated (attempt ${correction.attempt})`, MODULE_NAME_FANCY);
                         } else {
-                            // === CEILING: Mark corrected traits as ceiling ===
-                            const corrected_ids = correction.trait_ids;
-                            state.ceiling_traits = [...new Set([...(state.ceiling_traits || []), ...corrected_ids])];
+                            // === CEILING ===
+                            const corrected_ids = correction.dim_ids;
+                            state.ceiling_dimensions = [...new Set([...(state.ceiling_dimensions || []), ...corrected_ids])];
                             state.ceiling_model = get_current_model_id();
                             const corrected_labels = corrected_ids.map(id =>
-                                state.traits.find(t => t.id === id)?.label || id);
+                                state.dimensions.find(d => d.id === id)?.label || id);
                             toastr.error(
                                 `${corrected_labels.join(', ')} may be at their ceiling for this model. Consider manual intervention.`,
                                 MODULE_NAME_FANCY,
                                 { timeOut: 0, extendedTimeOut: 0 },
                             );
 
-                            // Check if any non-ceiling traits still need correction
-                            const remaining = drifting.filter(d => !corrected_ids.includes(d.trait_id));
+                            const remaining = drifting.filter(d => !corrected_ids.includes(d.dim_id));
                             if (remaining.length === 0) {
                                 clear_correction();
                                 state.active_correction = { enabled: false };
                             } else {
-                                // Restart correction cycle for remaining drifting traits
-                                const remaining_with_labels = remaining.map(d => ({
-                                    ...d,
-                                    label: state.traits.find(t => t.id === d.trait_id)?.label || d.trait_id,
-                                }));
-                                const text = await generate_correction(remaining_with_labels, state.traits, char_desc, chat, null, null);
+                                const text = await generate_correction(remaining, state.dimensions, char_desc, chat, null, null);
                                 inject_correction(text);
                                 state.active_correction = {
                                     enabled: true,
-                                    trait_ids: remaining.map(d => d.trait_id),
+                                    dim_ids: remaining.map(d => d.dim_id),
                                     injection_text: text,
                                     since_message: message_index,
                                     attempt: 1,
                                     scores_since_correction: 0,
-                                    score_at_correction: Math.min(...remaining.map(d => d.moving_avg || 0)),
+                                    deviation_at_correction: Math.max(...remaining.map(d => d.deviation || 0)),
                                 };
                                 state.corrections_injected++;
-                                state.ever_corrected_traits = [...new Set([...(state.ever_corrected_traits || []), ...remaining.map(d => d.trait_id)])];
+                                state.ever_corrected_dimensions = [...new Set([...(state.ever_corrected_dimensions || []), ...remaining.map(d => d.dim_id)])];
                             }
                         }
                     }
                 }
             }
         } else if (state.active_correction?.enabled) {
-            // All traits above drift threshold -- check if recovery is confirmed
+            // No dimensions drifting -- check if recovery is confirmed
             const recovery_margin = get_settings('recovery_margin');
-            const recovery_threshold = get_settings('drift_threshold') + recovery_margin;
-            const corrected_trait_ids = state.active_correction.trait_ids || [];
+            const recovery_dev_threshold = threshold - recovery_margin;
+            const corrected_dim_ids = state.active_correction.dim_ids || [];
 
-            // Check if all corrected traits are above the recovery threshold (with hysteresis)
-            // Use post-correction averages to avoid dilution from pre-correction low scores
             const recovery_post_avgs = compute_post_correction_averages(
-                corrected_trait_ids, state.score_history, state.active_correction.since_message,
+                corrected_dim_ids, state.score_history, state.active_correction.since_message,
             );
-            const all_above_recovery = corrected_trait_ids.every(trait_id => {
-                const effective_avg = recovery_post_avgs[trait_id] ?? drift[trait_id]?.moving_avg ?? null;
-                return effective_avg !== null && effective_avg >= recovery_threshold;
+            const all_within_tolerance = corrected_dim_ids.every(dim_id => {
+                const dim = state.dimensions.find(d => d.id === dim_id);
+                const effective_avg = recovery_post_avgs[dim_id] ?? drift[dim_id]?.moving_avg ?? null;
+                if (effective_avg === null || !dim) return false;
+                return Math.abs(effective_avg - dim.target) <= recovery_dev_threshold + FLOAT_EPSILON;
             });
 
-            if (all_above_recovery) {
+            if (all_within_tolerance) {
                 state.recovery_cycles = (state.recovery_cycles || 0) + 1;
                 const needed = get_settings('recovery_patience');
                 if (state.recovery_cycles >= needed) {
-                    // Confirmed recovery -- remove correction, start cooldown
                     clear_correction();
                     state.active_correction = { enabled: false };
                     state.cooldown_remaining = get_settings('correction_cooldown');
                     state.recovery_cycles = 0;
-                    toastr.success('Character traits stabilized', MODULE_NAME_FANCY);
+                    toastr.success('Dimensions stabilized', MODULE_NAME_FANCY);
                 } else {
                     log(`Recovery cycle ${state.recovery_cycles}/${needed} -- waiting for confirmation`);
                 }
             } else {
-                // Not all traits above recovery threshold yet, reset counter
                 state.recovery_cycles = 0;
             }
         }
 
-        // Check if any ceiling traits have naturally recovered
-        if (state.ceiling_traits?.length > 0) {
-            const threshold = get_settings('drift_threshold');
-            const recovered = state.ceiling_traits.filter(trait_id => {
-                const d = drift[trait_id];
-                return d && d.moving_avg !== null && d.moving_avg >= threshold;
+        // Check if any ceiling dimensions have naturally recovered
+        if (state.ceiling_dimensions?.length > 0) {
+            const recovered = state.ceiling_dimensions.filter(dim_id => {
+                const d = drift[dim_id];
+                return d && d.deviation !== null && d.deviation <= threshold + FLOAT_EPSILON;
             });
             if (recovered.length > 0) {
-                state.ceiling_traits = state.ceiling_traits.filter(id => !recovered.includes(id));
+                state.ceiling_dimensions = state.ceiling_dimensions.filter(id => !recovered.includes(id));
                 const recovered_labels = recovered.map(id =>
-                    state.traits.find(t => t.id === id)?.label || id);
-                toastr.info(`${recovered_labels.join(', ')} recovered above threshold. Auto-correction re-enabled.`, MODULE_NAME_FANCY);
+                    state.dimensions.find(d => d.id === id)?.label || id);
+                toastr.info(`${recovered_labels.join(', ')} recovered within tolerance. Auto-correction re-enabled.`, MODULE_NAME_FANCY);
             }
         }
 
@@ -1557,11 +1964,18 @@ async function score_and_process_message(message_index, { force = false } = {}) 
     } finally {
         SCORING_IN_PROGRESS = false;
 
-        // Process queued messages
-        if (SCORING_QUEUE.length > 0) {
+        // Process queued messages (validate index still exists before processing)
+        while (SCORING_QUEUE.length > 0) {
             const next_index = SCORING_QUEUE.shift();
-            log(`Processing queued message #${next_index} (${SCORING_QUEUE.length} remaining)`);
-            setTimeout(() => on_message_received(next_index), 100);
+            const chat = getContext().chat;
+            const msg = chat?.[next_index];
+            if (msg && !msg.is_user && !msg.is_system) {
+                log(`Processing queued message #${next_index} (${SCORING_QUEUE.length} remaining)`);
+                setTimeout(() => on_message_received(next_index), 100);
+                break;
+            } else {
+                log(`Skipping stale queued message #${next_index} (message no longer valid)`);
+            }
         }
     }
 }
@@ -1583,30 +1997,41 @@ async function on_message_received(message_index) {
 
 /**
  * Card Resilience Score (0-100):
- * Measures how well the character card maintains trait adherence without intervention.
+ * Measures how well the character card stays near target values without intervention.
  */
-function compute_card_resilience(score_history, traits, corrections_count) {
+function compute_card_resilience(score_history, dimensions, corrections_count) {
     if (score_history.length === 0) return 0;
     const threshold = get_settings('drift_threshold');
 
-    // Initial adherence: mean of first 3 scored messages across all traits
-    const initial = mean(score_history.slice(0, 3).flatMap(s => Object.values(s.scores)));
+    // Initial accuracy: how close first 3 scored messages are to targets
+    const initial_deviations = [];
+    for (const dim of dimensions) {
+        const early_scores = score_history.slice(0, 3)
+            .map(s => s.scores[dim.id]).filter(s => s !== undefined);
+        if (early_scores.length > 0) {
+            initial_deviations.push(mean(early_scores.map(s => Math.abs(s - dim.target))));
+        }
+    }
+    const initial = initial_deviations.length > 0 ? Math.max(0, 1 - mean(initial_deviations)) : 0.5;
 
-    // Time-to-drift: for each trait, messages until first drop below threshold
-    const total_scored = score_history.length;
-    const scored_traits = traits.filter(t =>
-        score_history.some(s => s.scores[t.id] !== undefined)
+    // Drift resistance: for each dimension, proportion of time within tolerance.
+    // Uses a fixed reference window (capped at 20) to avoid biasing toward longer chats.
+    const RESILIENCE_WINDOW = Math.min(score_history.length, 20);
+    const windowed_history = score_history.slice(0, RESILIENCE_WINDOW);
+    const scored_dims = dimensions.filter(d =>
+        windowed_history.some(s => s.scores[d.id] !== undefined)
     );
-    const drift_resistance = scored_traits.length > 0
-        ? scored_traits.map(t => {
-            const first_drift = score_history.findIndex(s =>
-                s.scores[t.id] !== undefined && s.scores[t.id] < threshold
-            );
-            return first_drift === -1 ? 1.0 : first_drift / total_scored;
+    const drift_resistance = scored_dims.length > 0
+        ? scored_dims.map(d => {
+            const dim_scores = windowed_history.filter(s => s.scores[d.id] !== undefined);
+            if (dim_scores.length === 0) return 0.5;
+            const within_tolerance = dim_scores.filter(s =>
+                Math.abs(s.scores[d.id] - d.target) <= threshold
+            ).length;
+            return within_tolerance / dim_scores.length;
         })
         : [0.5];
 
-    // Natural vs corrected: penalty if corrections were needed
     const correction_penalty = corrections_count > 0 ? 0.85 : 1.0;
 
     return Math.round(initial * 40 + mean(drift_resistance) * 50 + correction_penalty * 10);
@@ -1614,72 +2039,91 @@ function compute_card_resilience(score_history, traits, corrections_count) {
 
 /**
  * Session Quality Score (0-100):
- * Overall quality of the roleplay session in terms of character consistency.
+ * Overall closeness to target positions across the session.
  */
-function compute_session_quality(score_history, traits, drift_state) {
+function compute_session_quality(score_history, dimensions, drift_state) {
     if (score_history.length === 0) return 0;
 
-    const all_scores = score_history.flatMap(s => Object.values(s.scores));
-    const overall_mean = mean(all_scores);
+    // Mean deviation from targets across all scores
+    const all_deviations = [];
+    for (const entry of score_history) {
+        for (const dim of dimensions) {
+            if (entry.scores[dim.id] !== undefined) {
+                all_deviations.push(Math.abs(entry.scores[dim.id] - dim.target));
+            }
+        }
+    }
+    const overall_accuracy = all_deviations.length > 0 ? Math.max(0, 1 - mean(all_deviations)) : 0.5;
 
-    // Consistency: inverse of variance
-    const variance = compute_variance(all_scores);
-    const consistency = Math.max(0, 1 - variance * 2);
+    // Consistency: inverse of deviation variance
+    const variance = compute_variance(all_deviations);
+    const consistency = variance !== null ? Math.max(0, 1 - variance * 2) : 0.5;
 
-    // Worst-trait penalty
-    const avg_values = Object.values(drift_state).map(d => d.moving_avg ?? 0.5);
-    const worst_trait_avg = avg_values.length > 0 ? Math.min(...avg_values) : 0.5;
-    const floor_factor = Math.max(0.5, worst_trait_avg);
+    // Worst dimension penalty
+    const dev_values = Object.values(drift_state).map(d => d.deviation ?? 0);
+    const worst_dev = dev_values.length > 0 ? Math.max(...dev_values) : 0;
+    const floor_factor = Math.max(0.5, 1 - worst_dev);
 
-    return Math.round(overall_mean * 40 + consistency * 30 + floor_factor * 30);
+    // Dimension coverage: penalize sessions where many dimensions were never scored
+    const dims_with_data = dimensions.filter(d =>
+        score_history.some(s => s.scores[d.id] !== undefined)
+    ).length;
+    const coverage = dimensions.length > 0 ? dims_with_data / dimensions.length : 1;
+    const coverage_factor = Math.max(0.6, coverage); // Floor at 0.6 so sparse sessions aren't decimated
+
+    const raw = overall_accuracy * 40 + consistency * 30 + floor_factor * 30;
+    return Math.round(raw * coverage_factor);
 }
 
 /**
  * Model Compatibility Score (0-100):
- * How well the current model handles this character's personality traits.
+ * How well the current model handles this character's dimensional profile.
  */
-function compute_model_compatibility(traits, ceiling_traits, corrections_count, score_history, drift_state) {
+function compute_model_compatibility(dimensions, ceiling_dimensions, corrections_count, score_history, drift_state) {
     if (score_history.length === 0) return 0;
 
-    const ceiling_ratio = traits.length > 0 ? 1 - (ceiling_traits.length / traits.length) : 1;
+    const ceiling_ratio = dimensions.length > 0 ? 1 - (ceiling_dimensions.length / dimensions.length) : 1;
 
     const correction_load = Math.max(0, 1 - (corrections_count / (score_history.length * 0.5 || 1)));
 
-    const avg_values = Object.values(drift_state).map(d => d.moving_avg ?? 0.5);
-    const end_health = mean(avg_values);
+    // End health: how close the final drift state is to targets
+    const dev_values = Object.values(drift_state).map(d => d.deviation ?? 0);
+    const end_health = dev_values.length > 0 ? Math.max(0, 1 - mean(dev_values)) : 0.5;
 
     return Math.round(ceiling_ratio * 40 + correction_load * 30 + end_health * 30);
 }
 
 /**
- * Classify a trait's verdict based on session behavior.
+ * Classify a dimension's verdict based on session behavior.
+ * Uses CUSUM trigger history for drift detection consistency (not raw score thresholds,
+ * which would flag single outliers that CUSUM correctly ignores as noise).
  */
-function compute_trait_verdict(trait, score_history, drift_state, ceiling_traits, ever_corrected_traits) {
+function compute_dimension_verdict(dimension, score_history, drift_state, ceiling_dimensions, ever_corrected_dimensions, ever_cusum_triggered) {
     const threshold = get_settings('drift_threshold');
 
-    if ((ceiling_traits || []).includes(trait.id)) {
+    if ((ceiling_dimensions || []).includes(dimension.id)) {
         return 'ceiling';
     }
 
-    const actual_scores = score_history.filter(s => s.scores[trait.id] !== undefined);
+    const actual_scores = score_history.filter(s => s.scores[dimension.id] !== undefined);
     if (actual_scores.length < MIN_SCORES_FOR_VERDICT) {
         return 'insufficient_data';
     }
 
-    const ever_drifted = actual_scores.some(s => s.scores[trait.id] < threshold);
+    // Use CUSUM trigger history: consistent with how drift detection actually works.
+    // A single outlier score won't count as "ever drifted" unless CUSUM accumulated enough.
+    const ever_drifted = (ever_cusum_triggered || []).includes(dimension.id);
 
     if (!ever_drifted) {
         return 'natural_fit';
     }
 
-    // Check if corrections were applied for THIS specific trait
-    const was_corrected = (ever_corrected_traits || []).includes(trait.id);
-    const d = drift_state[trait.id];
-    if (d && d.moving_avg !== null && d.moving_avg >= threshold) {
+    const was_corrected = (ever_corrected_dimensions || []).includes(dimension.id);
+    const d = drift_state[dimension.id];
+    if (d && d.deviation !== null && d.deviation <= threshold) {
         return was_corrected ? 'correctable' : 'maintainable';
     }
 
-    // Trait drifted and hasn't recovered
     return was_corrected ? 'drifting' : 'volatile';
 }
 
@@ -1702,41 +2146,44 @@ async function generate_report() {
         || 'Unknown model';
 
     // Compute scores
-    const card_resilience = compute_card_resilience(state.score_history, state.traits, state.corrections_injected);
-    const session_quality = compute_session_quality(state.score_history, state.traits, state.drift_state);
+    const card_resilience = compute_card_resilience(state.score_history, state.dimensions, state.corrections_injected);
+    const session_quality = compute_session_quality(state.score_history, state.dimensions, state.drift_state);
     const model_compatibility = compute_model_compatibility(
-        state.traits, state.ceiling_traits || [], state.corrections_injected,
+        state.dimensions, state.ceiling_dimensions || [], state.corrections_injected,
         state.score_history, state.drift_state,
     );
 
-    // Compute per-trait verdicts
-    const trait_verdicts = {};
-    const trait_curves = {};
-    for (const trait of state.traits) {
-        trait_verdicts[trait.id] = compute_trait_verdict(
-            trait, state.score_history, state.drift_state,
-            state.ceiling_traits || [], state.ever_corrected_traits || [],
+    // Compute per-dimension verdicts
+    const dimension_verdicts = {};
+    const dimension_curves = {};
+    for (const dim of state.dimensions) {
+        dimension_verdicts[dim.id] = compute_dimension_verdict(
+            dim, state.score_history, state.drift_state,
+            state.ceiling_dimensions || [], state.ever_corrected_dimensions || [],
+            state.ever_cusum_triggered || [],
         );
-        trait_curves[trait.id] = state.score_history.map(s => s.scores[trait.id]).filter(s => s !== undefined);
+        dimension_curves[dim.id] = state.score_history.map(s => s.scores[dim.id]).filter(s => s !== undefined);
     }
 
     // Generate LLM insights
     let insights = '';
     try {
-        const trait_breakdown = state.traits.map(t => {
-            const verdict = trait_verdicts[t.id];
-            const curve = trait_curves[t.id];
+        const dimension_breakdown = state.dimensions.map(d => {
+            const verdict = dimension_verdicts[d.id];
+            const curve = dimension_curves[d.id];
             const avg = curve.length > 0 ? mean(curve).toFixed(2) : '?';
-            return `- ${t.label}: verdict=${verdict}, mean_score=${avg}, curve=[${curve.map(s => s.toFixed(2)).join(', ')}]`;
+            const desc = d.description ? ` (${d.description})` : '';
+            const ctx = d.context ? ` context="${d.context}"` : '';
+            return `- ${d.label}${desc}: target=${d.target.toFixed(2)}, verdict=${verdict}, mean_score=${avg},${ctx} curve=[${curve.map(s => s.toFixed(2)).join(', ')}]`;
         }).join('\n');
 
         const prompt = REPORT_INSIGHTS_PROMPT
-            .replace(/\{\{char_name\}\}/g, char_name)
-            .replace(/\{\{model_name\}\}/g, model_name)
+            .replace(/\{\{char_name\}\}/g, sanitize_for_prompt(char_name))
+            .replace(/\{\{model_name\}\}/g, sanitize_for_prompt(model_name))
             .replace('{{card_score}}', String(card_resilience))
             .replace('{{session_score}}', String(session_quality))
             .replace('{{model_score}}', String(model_compatibility))
-            .replace('{{trait_breakdown}}', trait_breakdown)
+            .replace('{{dimension_breakdown}}', dimension_breakdown)
             .replace('{{correction_history}}', `${state.corrections_injected} corrections applied`);
 
         const messages = [
@@ -1761,10 +2208,10 @@ async function generate_report() {
         card_resilience: card_resilience,
         session_quality: session_quality,
         model_compatibility: model_compatibility,
-        trait_verdicts: trait_verdicts,
-        trait_curves: trait_curves,
+        dimension_verdicts: dimension_verdicts,
+        dimension_curves: dimension_curves,
         corrections_count: state.corrections_injected,
-        ceiling_traits: state.ceiling_traits || [],
+        ceiling_dimensions: state.ceiling_dimensions || [],
         insights: insights,
     };
 
@@ -1780,6 +2227,7 @@ async function generate_report() {
         card_name: char_name,
         model: model_name,
         scores: [card_resilience, session_quality, model_compatibility],
+        dimension_ids: state.dimensions.map(d => d.id),
         date: new Date().toISOString().split('T')[0],
     });
     if (index.length > MAX_REPORT_INDEX) {
@@ -1818,20 +2266,21 @@ function export_report() {
         card_resilience: state.report.card_resilience,
         session_quality: state.report.session_quality,
         model_compatibility: state.report.model_compatibility,
-        traits: state.traits.map(t => ({
-            id: t.id,
-            label: t.label,
-            description: t.description,
-            dimension: t.dimension,
-            polarity: t.polarity,
-            verdict: state.report.trait_verdicts[t.id],
-            initial_score: state.score_history.length > 0 ? state.score_history[0].scores[t.id] : null,
-            final_score: state.score_history.length > 0 ? state.score_history[state.score_history.length - 1].scores[t.id] : null,
-            mean_score: mean((state.report.trait_curves[t.id] || [])),
-            score_curve: state.report.trait_curves[t.id] || [],
+        dimensions: state.dimensions.map(d => ({
+            id: d.id,
+            label: d.label,
+            low_label: d.low_label,
+            high_label: d.high_label,
+            target: d.target,
+            context: d.context,
+            verdict: state.report.dimension_verdicts[d.id],
+            initial_score: state.score_history.length > 0 ? state.score_history[0].scores[d.id] : null,
+            final_score: state.score_history.length > 0 ? state.score_history[state.score_history.length - 1].scores[d.id] : null,
+            mean_score: mean((state.report.dimension_curves[d.id] || [])),
+            score_curve: state.report.dimension_curves[d.id] || [],
         })),
         corrections_count: state.report.corrections_count,
-        ceiling_traits: state.report.ceiling_traits,
+        ceiling_dimensions: state.report.ceiling_dimensions,
         insights: state.report.insights,
         score_history: state.score_history,
         card_description: char_desc,
@@ -1900,7 +2349,7 @@ function update_status_display() {
         } else if (state.active_correction?.enabled) {
             status_el.textContent = `Active | Correcting`;
             status_el.className = 'dc_text_orange';
-        } else if (state.traits?.length > 0) {
+        } else if (state.dimensions?.length > 0) {
             status_el.textContent = `Active | Scoring every ${get_settings('score_frequency')} messages`;
             status_el.className = 'dc_text_green';
         } else {
@@ -1930,18 +2379,19 @@ function update_status_display() {
 }
 
 /**
- * Update the trait health bars in the Overview tab.
+ * Update the dimension health bars in the Overview tab.
+ * Shows spectrum bars with target markers and current position indicators.
  */
 function update_trait_bars() {
     const container = document.getElementById('dc_trait_health_container');
     if (!container) return;
 
     const state = get_chat_state();
-    const traits = state.traits || [];
+    const dimensions = state.dimensions || [];
     const drift = state.drift_state || {};
     const threshold = get_settings('drift_threshold');
 
-    if (traits.length === 0) {
+    if (dimensions.length === 0) {
         container.innerHTML = `
             <div class="dc_empty_state">
                 <i class="fa-solid fa-user-slash"></i>
@@ -1953,18 +2403,20 @@ function update_trait_bars() {
     const window_size = get_settings('drift_window');
     let html = '';
 
-    for (const trait of traits) {
-        const d = drift[trait.id] || { moving_avg: null, trend: 'no_data', correcting: false };
+    for (const dim of dimensions) {
+        const d = drift[dim.id] || { moving_avg: null, deviation: null, trend: 'no_data', correcting: false };
         const avg = d.moving_avg;
+        const dev = d.deviation;
         const pct = avg !== null ? Math.round(avg * 100) : 0;
+        const target_pct = Math.round(dim.target * 100);
         const score_text = avg !== null ? avg.toFixed(2) : '--';
 
-        // Color class
+        // Color based on distance from target (not absolute position)
         let bar_class = 'dc_bar_green';
         if (avg !== null) {
             if (d.correcting) bar_class = 'dc_bar_correcting';
-            else if (avg < threshold) bar_class = 'dc_bar_red';
-            else if (avg < 0.6) bar_class = 'dc_bar_yellow';
+            else if (dev > threshold) bar_class = 'dc_bar_red';
+            else if (dev > threshold * 0.6) bar_class = 'dc_bar_yellow';
         }
 
         // Trend text and class
@@ -1973,9 +2425,11 @@ function update_trait_bars() {
         if (d.correcting) {
             trend_text = 'CORRECTING';
             trend_class = 'dc_trend_correcting';
-        } else if (d.trend === 'declining') {
+        } else if (d.trend === 'drifting') {
+            trend_text = 'drifting';
             trend_class = 'dc_trend_declining';
-        } else if (d.trend === 'improving') {
+        } else if (d.trend === 'correcting') {
+            trend_text = 'recovering';
             trend_class = 'dc_trend_improving';
         } else if (d.trend === 'stable') {
             trend_class = 'dc_trend_stable';
@@ -1984,23 +2438,28 @@ function update_trait_bars() {
         // Sparkline (last 5 scores)
         const recent = (state.score_history || [])
             .slice(-window_size)
-            .map(s => s.scores[trait.id])
+            .map(s => s.scores[dim.id])
             .filter(s => s !== undefined);
 
         let sparkline_html = '';
         for (const val of recent.slice(-5)) {
-            let dot_class = 'dc_bar_green';
-            if (val < threshold) dot_class = 'dc_bar_red';
-            else if (val < 0.6) dot_class = 'dc_bar_yellow';
-            sparkline_html += `<div class="dc_spark_dot" style="background: ${dot_class === 'dc_bar_green' ? '#4caf50' : dot_class === 'dc_bar_yellow' ? '#ffcc00' : '#f44336'}" title="${val.toFixed(2)}"></div>`;
+            const val_dev = Math.abs(val - dim.target);
+            let dot_color = '#4caf50';
+            if (val_dev > threshold) dot_color = '#f44336';
+            else if (val_dev > threshold * 0.6) dot_color = '#ffcc00';
+            sparkline_html += `<div class="dc_spark_dot" style="background: ${dot_color}" title="${val.toFixed(2)} (target: ${dim.target.toFixed(2)})"></div>`;
         }
 
         html += `
             <div class="dc_trait_row">
-                <span class="dc_trait_label" title="${escapeHtml(trait.description)}">${escapeHtml(trait.label)}</span>
+                <div class="dc_dim_labels">
+                    <span class="dc_dim_low_label">${escapeHtml(dim.low_label)}</span>
+                    <span class="dc_trait_label" title="${escapeHtml(dim.description)}${dim.context ? ' | ' + escapeHtml(dim.context) : ''}">${escapeHtml(dim.label)}</span>
+                    <span class="dc_dim_high_label">${escapeHtml(dim.high_label)}</span>
+                </div>
                 <div class="dc_trait_bar_container">
                     <div class="dc_trait_bar_fill ${bar_class}" style="width: ${pct}%"></div>
-                    <div class="dc_trait_threshold_marker" style="left: ${threshold * 100}%"></div>
+                    <div class="dc_dim_target_marker" style="left: ${target_pct}%" title="Target: ${dim.target.toFixed(2)}"></div>
                 </div>
                 <span class="dc_trait_score">${score_text}</span>
                 <div class="dc_trait_sparkline">${sparkline_html}</div>
@@ -2028,11 +2487,11 @@ function update_correction_panel() {
 
     section.style.display = '';
 
-    const traits_el = document.getElementById('dc_correction_traits');
-    if (traits_el) {
-        const labels = (correction.trait_ids || []).map(id =>
-            state.traits.find(t => t.id === id)?.label || id);
-        traits_el.textContent = labels.join(', ') || '--';
+    const dims_el = document.getElementById('dc_correction_dims');
+    if (dims_el) {
+        const labels = (correction.dim_ids || []).map(id =>
+            state.dimensions.find(d => d.id === id)?.label || id);
+        dims_el.textContent = labels.join(', ') || '--';
     }
 
     const attempt_el = document.getElementById('dc_correction_attempt');
@@ -2049,14 +2508,14 @@ function update_correction_panel() {
 }
 
 /**
- * Update the ceiling traits warning.
+ * Update the ceiling dimensions warning.
  */
 function update_ceiling_warning() {
     const section = document.getElementById('dc_ceiling_section');
     if (!section) return;
 
     const state = get_chat_state();
-    const ceiling = state.ceiling_traits || [];
+    const ceiling = state.ceiling_dimensions || [];
 
     if (ceiling.length === 0) {
         section.style.display = 'none';
@@ -2066,7 +2525,7 @@ function update_ceiling_warning() {
     section.style.display = '';
     const text_el = document.getElementById('dc_ceiling_text');
     if (text_el) {
-        const labels = ceiling.map(id => state.traits.find(t => t.id === id)?.label || id);
+        const labels = ceiling.map(id => state.dimensions.find(d => d.id === id)?.label || id);
         text_el.textContent = `${labels.join(', ')} may be at their ceiling for this model. Consider manual intervention.`;
     }
 }
@@ -2096,21 +2555,24 @@ function update_message_badges() {
         container.className = 'dc_message_badge_container';
 
         const threshold = get_settings('drift_threshold');
-        for (const [trait_id, score] of Object.entries(dg.scores)) {
+        const alert_threshold = get_settings('drift_alert_threshold');
+        for (const [dim_id, score] of Object.entries(dg.scores)) {
             if (score === null || score === undefined) continue;
-            const trait = state.traits.find(t => t.id === trait_id);
-            const label = trait?.label || trait_id;
+            const dim = state.dimensions.find(d => d.id === dim_id);
+            if (!dim) continue;
+            const label = dim.label || dim_id;
+            const deviation = Math.abs(score - dim.target);
 
             let badge_class = 'dc_badge_green';
-            if (score < threshold) badge_class = 'dc_badge_red';
-            else if (score < 0.6) badge_class = 'dc_badge_yellow';
+            if (deviation > alert_threshold) badge_class = 'dc_badge_red';
+            else if (deviation > threshold) badge_class = 'dc_badge_yellow';
 
             const corrected_class = dg.correction_active ? ' dc_badge_corrected' : '';
 
             const badge = document.createElement('span');
             badge.className = `dc_message_badge ${badge_class}${corrected_class}`;
             badge.textContent = `${label}: ${score.toFixed(2)}`;
-            badge.title = `${label}: ${score.toFixed(2)}${dg.correction_active ? ' (correction active)' : ''}`;
+            badge.title = `${label}: ${score.toFixed(2)} (target: ${dim.target.toFixed(2)}, deviation: ${deviation.toFixed(2)})${dg.correction_active ? ' [correction active]' : ''}`;
             container.appendChild(badge);
         }
 
@@ -2143,17 +2605,17 @@ function update_report_display() {
     update_score_bar('dc_report_session_bar', 'dc_report_session_score', report.session_quality);
     update_score_bar('dc_report_model_bar', 'dc_report_model_score', report.model_compatibility);
 
-    // Trait verdicts
+    // Dimension verdicts
     const verdicts_el = document.getElementById('dc_report_verdicts');
     if (verdicts_el) {
         let html = '';
-        for (const trait of state.traits) {
-            const verdict = report.trait_verdicts[trait.id] || 'unknown';
+        for (const dim of state.dimensions) {
+            const verdict = report.dimension_verdicts[dim.id] || 'unknown';
             const badge_class = `dc_verdict_${verdict}`;
             const display_verdict = verdict.replace(/_/g, ' ').toUpperCase();
             html += `
                 <div class="dc_verdict_row">
-                    <span>${escapeHtml(trait.label)}</span>
+                    <span>${escapeHtml(dim.label)}</span>
                     <span class="dc_verdict_badge ${badge_class}">${display_verdict}</span>
                 </div>`;
         }
@@ -2202,7 +2664,7 @@ function update_report_index() {
     let html = '';
     for (let i = 0; i < index.length; i++) {
         const entry = index[i];
-        const scores_text = entry.scores ? `[${entry.scores.join('/')}]` : '';
+        const scores_text = entry.scores ? `[${entry.scores.map(s => escapeHtml(String(s))).join('/')}]` : '';
         html += `
             <div class="dc_report_index_item" data-index="${i}">
                 <input type="checkbox" class="dc_report_select" data-index="${i}" />
@@ -2224,8 +2686,13 @@ function compare_reports() {
     }
 
     const index = get_settings('report_index') || [];
-    const idx_a = parseInt(checkboxes[0].dataset.index);
-    const idx_b = parseInt(checkboxes[1].dataset.index);
+    const idx_a = parseInt(checkboxes[0].dataset.index, 10);
+    const idx_b = parseInt(checkboxes[1].dataset.index, 10);
+
+    if (isNaN(idx_a) || isNaN(idx_b)) {
+        toastr.warning('Invalid report selection.', MODULE_NAME_FANCY);
+        return;
+    }
 
     const a = index[idx_a];
     const b = index[idx_b];
@@ -2601,8 +3068,8 @@ function add_popout_button() {
  */
 async function score_chat_retroactively() {
     const state = get_chat_state();
-    if (!state.traits || state.traits.length === 0) {
-        toastr.warning('No traits extracted. Extract traits first.', MODULE_NAME_FANCY);
+    if (!state.dimensions || state.dimensions.length === 0) {
+        toastr.warning('No dimensions calibrated. Calibrate dimensions first.', MODULE_NAME_FANCY);
         return;
     }
 
@@ -2662,9 +3129,9 @@ async function score_chat_retroactively() {
             if (!msg || !msg.mes) continue;
 
             try {
-                const scores = await score_response(msg.mes, state.traits, char_desc, msg_index);
+                const scores = await score_response(msg.mes, state.dimensions, char_desc, msg_index);
 
-                if (Object.keys(scores).length === 0) {
+                if (Object.keys(scores).filter(k => k !== '_reasoning').length === 0) {
                     warn(`Retroactive: empty scores for message #${msg_index}, skipping`);
                     continue;
                 }
@@ -2683,7 +3150,7 @@ async function score_chat_retroactively() {
         }
 
         // Recompute drift state after all scoring
-        const drift = update_drift_state(state.traits, state.score_history);
+        const drift = update_drift_state(state.dimensions, state.score_history);
         save_drift_state(drift);
         save_chat_state(state);
         update_dashboard();
@@ -2713,8 +3180,10 @@ function initialize_ui_listeners() {
         set_settings('enabled', $(this).is(':checked'));
         update_status_display();
         if (!$(this).is(':checked')) {
-            clear_correction();
+            const state = get_chat_state();
+            clear_correction(state);
             clear_baseline();
+            save_chat_state(state);
         }
     });
 
@@ -2793,7 +3262,7 @@ function initialize_ui_listeners() {
         { id: 'dc_drift_threshold', key: 'drift_threshold', display: 'dc_drift_threshold_value', format: v => parseFloat(v).toFixed(2) },
         { id: 'dc_drift_alert_threshold', key: 'drift_alert_threshold', display: 'dc_drift_alert_threshold_value', format: v => parseFloat(v).toFixed(2) },
         { id: 'dc_correction_depth', key: 'correction_depth', display: 'dc_correction_depth_value', format: v => v },
-        { id: 'dc_correction_max_traits', key: 'correction_max_traits', display: 'dc_correction_max_traits_value', format: v => v },
+        { id: 'dc_correction_max_dimensions', key: 'correction_max_dimensions', display: 'dc_correction_max_dimensions_value', format: v => v },
         { id: 'dc_correction_patience', key: 'correction_patience', display: 'dc_correction_patience_value', format: v => v },
         { id: 'dc_correction_max_attempts', key: 'correction_max_attempts', display: 'dc_correction_max_attempts_value', format: v => v },
         { id: 'dc_correction_cooldown', key: 'correction_cooldown', display: 'dc_correction_cooldown_value', format: v => v },
@@ -2828,8 +3297,8 @@ function initialize_ui_listeners() {
                 }
 
                 const state = get_chat_state();
-                if (state.traits?.length > 0 && state.score_history?.length > 0) {
-                    const drift = update_drift_state(state.traits, state.score_history);
+                if (state.dimensions?.length > 0 && state.score_history?.length > 0) {
+                    const drift = update_drift_state(state.dimensions, state.score_history);
                     save_drift_state(drift);
                     update_trait_bars();
                 }
@@ -2937,19 +3406,22 @@ function initialize_ui_listeners() {
                 return;
             }
 
-            toastr.info('Extracting traits...', MODULE_NAME_FANCY);
-            const traits = await extract_traits(char_desc);
-            if (traits.length > 0) {
+            toastr.info('Calibrating dimensions...', MODULE_NAME_FANCY);
+            const dims = await calibrate_dimensions(char_desc);
+            if (dims.length > 0) {
                 const state = get_chat_state();
-                state.traits = traits;
-                state.trait_extraction_hash = hash_description(char_desc);
-                state.traits_manually_edited = false;
-                CURRENT_TRAITS = traits;
+                state.dimensions = dims;
+                state.calibration_hash = hash_description(char_desc);
+                state.dimensions_manually_edited = false;
+                CURRENT_DIMENSIONS = dims;
+
+                // Pin calibration for this character
+                save_pinned_calibration(dims);
 
                 // Regenerate baseline Author's Note
                 if (get_settings('baseline_enabled')) {
                     try {
-                        const baseline = await generate_baseline(traits, char_desc);
+                        const baseline = await generate_baseline(dims, char_desc);
                         if (baseline) {
                             state.baseline_text = baseline;
                             inject_baseline(baseline);
@@ -2961,12 +3433,12 @@ function initialize_ui_listeners() {
 
                 save_chat_state(state);
                 update_dashboard();
-                toastr.success(`Extracted ${traits.length} traits`, MODULE_NAME_FANCY);
+                toastr.success(`Calibrated ${dims.length} dimensions`, MODULE_NAME_FANCY);
             } else {
-                toastr.error('Failed to extract traits.', MODULE_NAME_FANCY);
+                toastr.error('Failed to calibrate dimensions.', MODULE_NAME_FANCY);
             }
         } catch (err) {
-            toastr.error(`Trait extraction failed: ${err.message}`, MODULE_NAME_FANCY);
+            toastr.error(`Dimension calibration failed: ${err.message}`, MODULE_NAME_FANCY);
         } finally {
             btn.removeClass('dc_disabled');
         }
@@ -2992,7 +3464,8 @@ function initialize_ui_listeners() {
         state.last_scored_message_id = null;
         state.corrections_injected = 0;
         state.active_correction = { enabled: false };
-        state.ceiling_traits = [];
+        state.ceiling_dimensions = [];
+        state.ever_cusum_triggered = [];
         state.cooldown_remaining = 0;
         state.recovery_cycles = 0;
         state.report = null;
@@ -3121,7 +3594,7 @@ function restore_settings_to_ui() {
         'dc_drift_threshold': { key: 'drift_threshold', display: 'dc_drift_threshold_value', format: v => parseFloat(v).toFixed(2) },
         'dc_drift_alert_threshold': { key: 'drift_alert_threshold', display: 'dc_drift_alert_threshold_value', format: v => parseFloat(v).toFixed(2) },
         'dc_correction_depth': { key: 'correction_depth', display: 'dc_correction_depth_value', format: v => v },
-        'dc_correction_max_traits': { key: 'correction_max_traits', display: 'dc_correction_max_traits_value', format: v => v },
+        'dc_correction_max_dimensions': { key: 'correction_max_dimensions', display: 'dc_correction_max_dimensions_value', format: v => v },
         'dc_correction_patience': { key: 'correction_patience', display: 'dc_correction_patience_value', format: v => v },
         'dc_correction_max_attempts': { key: 'correction_max_attempts', display: 'dc_correction_max_attempts_value', format: v => v },
         'dc_correction_cooldown': { key: 'correction_cooldown', display: 'dc_correction_cooldown_value', format: v => v },
@@ -3140,16 +3613,81 @@ function restore_settings_to_ui() {
 // ==================== EVENT LISTENERS ====================
 
 function register_event_listeners() {
-    // Chat changed: extract traits if needed, restore state
+    // Chat changed: calibrate dimensions if needed, restore state
     eventSource.on(event_types.CHAT_CHANGED, async () => {
         log('Chat changed, initializing...');
+
+        // Clear stale scoring state from previous chat to prevent blocking
+        if (SCORING_IN_PROGRESS) {
+            log('Clearing in-progress scoring state due to chat change');
+            SCORING_IN_PROGRESS = false;
+        }
+        SCORING_QUEUE = [];
+        PENDING_SWIPE_RESCORES.clear();
 
         const state = get_chat_state();
         const context = getContext();
         const char_desc = get_full_character_description();
 
+        // Version-gated data wipe: clear incompatible old scoring data
+        if (state.data_version !== MODULE_VERSION) {
+            log(`Data version mismatch: ${state.data_version || 'none'} -> ${MODULE_VERSION}. Wiping old scoring data.`);
+            state.score_history = [];
+            state.drift_state = {};
+            state.active_correction = { enabled: false };
+            state.ceiling_dimensions = [];
+            state.ever_corrected_dimensions = [];
+            state.ever_cusum_triggered = [];
+            state.messages_scored = 0;
+            state.last_scored_message_id = null;
+            state.recovery_cycles = 0;
+            state.cooldown_remaining = 0;
+            state.corrections_injected = 0;
+            state.report = null;
+            state.baseline_text = null;
+            state.dimensions = [];
+            state.calibration_hash = null;
+            state.data_version = MODULE_VERSION;
+
+            // Clear per-message driftguard markers from old scores
+            const chat = context.chat;
+            if (chat) {
+                for (const msg of chat) {
+                    if (msg?.extra?.driftguard) delete msg.extra.driftguard;
+                }
+            }
+
+            // Clear pinned calibrations (old calibrations lack rubric context)
+            set_settings('character_dimensions', {});
+
+            clear_correction();
+            clear_baseline();
+            save_chat_state(state);
+            CURRENT_DIMENSIONS = [];
+            CURRENT_DRIFT_STATE = {};
+
+            // Remove old per-message badges from DOM
+            document.querySelectorAll('.dc_message_badge_container').forEach(el => el.remove());
+
+            toastr.info(`DriftGuard upgraded to v${MODULE_VERSION}. Old scoring data cleared — dimensions will recalibrate.`, MODULE_NAME_FANCY);
+        }
+
+        // Validate score history integrity (filter corrupt entries)
+        if (Array.isArray(state.score_history) && state.score_history.length > 0) {
+            const before = state.score_history.length;
+            state.score_history = state.score_history.filter(entry =>
+                entry && typeof entry === 'object'
+                && entry.scores && typeof entry.scores === 'object'
+                && entry.message_id !== undefined
+            );
+            if (state.score_history.length < before) {
+                warn(`Filtered ${before - state.score_history.length} corrupt score history entries`);
+                save_chat_state(state);
+            }
+        }
+
         if (!char_desc) {
-            CURRENT_TRAITS = [];
+            CURRENT_DIMENSIONS = [];
             CURRENT_DRIFT_STATE = {};
             update_dashboard();
             return;
@@ -3157,32 +3695,39 @@ function register_event_listeners() {
 
         const desc_hash = hash_description(char_desc);
 
-        // Check if traits need extraction
-        if (!state.traits || state.traits.length === 0 || (desc_hash !== state.trait_extraction_hash && !state.traits_manually_edited)) {
-            if (EXTRACTION_IN_PROGRESS) {
-                log('Extraction already in progress, restoring existing state');
+        // Check if dimensions need calibration
+        if (!state.dimensions || state.dimensions.length === 0 || (desc_hash !== state.calibration_hash && !state.dimensions_manually_edited)) {
+            // Try to load pinned calibration for this character first
+            const pinned = load_pinned_calibration();
+            if (pinned && pinned.length > 0) {
+                log('Loaded pinned calibration from global settings');
+                state.dimensions = pinned;
+                state.calibration_hash = desc_hash;
+                save_chat_state(state);
+            } else if (CALIBRATION_IN_PROGRESS) {
+                log('Calibration already in progress, restoring existing state');
             } else {
-                EXTRACTION_IN_PROGRESS = true;
-                const extraction_chat_id = context.chatId;
+                CALIBRATION_IN_PROGRESS = true;
+                const calibration_chat_id = context.chatId;
                 try {
-                    log('Extracting traits for character...');
-                    const traits = await extract_traits(char_desc);
-                    // Verify we're still on the same chat after async
-                    if (getContext().chatId !== extraction_chat_id) {
-                        log('Chat changed during extraction, discarding stale traits');
+                    log('Calibrating dimensions for character...');
+                    const dims = await calibrate_dimensions(char_desc);
+                    if (getContext().chatId !== calibration_chat_id) {
+                        log('Chat changed during calibration, discarding stale results');
                         return;
                     }
-                    if (traits.length > 0) {
-                        state.traits = traits;
-                        state.trait_extraction_hash = desc_hash;
+                    if (dims.length > 0) {
+                        state.dimensions = dims;
+                        state.calibration_hash = desc_hash;
                         save_chat_state(state);
-                        log(`Traits extracted: ${traits.map(t => t.label).join(', ')}`);
+                        save_pinned_calibration(dims);
+                        log(`Dimensions calibrated: ${dims.map(d => `${d.id}=${d.target.toFixed(2)}`).join(', ')}`);
 
-                        // Generate baseline Author's Note alongside trait extraction
+                        // Generate baseline Author's Note alongside calibration
                         if (get_settings('baseline_enabled')) {
                             try {
-                                const baseline = await generate_baseline(traits, char_desc);
-                                if (baseline && getContext().chatId === extraction_chat_id) {
+                                const baseline = await generate_baseline(dims, char_desc);
+                                if (baseline && getContext().chatId === calibration_chat_id) {
                                     state.baseline_text = baseline;
                                     save_chat_state(state);
                                     log('Baseline Author\'s Note generated');
@@ -3193,20 +3738,20 @@ function register_event_listeners() {
                         }
                     }
                 } catch (err) {
-                    error('Trait extraction failed:', err);
+                    error('Dimension calibration failed:', err);
                 } finally {
-                    EXTRACTION_IN_PROGRESS = false;
+                    CALIBRATION_IN_PROGRESS = false;
                 }
             }
         }
 
         // Restore module state
-        CURRENT_TRAITS = state.traits || [];
+        CURRENT_DIMENSIONS = state.dimensions || [];
         CURRENT_DRIFT_STATE = state.drift_state || {};
 
         // Rebuild drift state from score history if needed
-        if (CURRENT_TRAITS.length > 0 && state.score_history?.length > 0 && Object.keys(CURRENT_DRIFT_STATE).length === 0) {
-            CURRENT_DRIFT_STATE = update_drift_state(CURRENT_TRAITS, state.score_history);
+        if (CURRENT_DIMENSIONS.length > 0 && state.score_history?.length > 0 && Object.keys(CURRENT_DRIFT_STATE).length === 0) {
+            CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history);
             state.drift_state = CURRENT_DRIFT_STATE;
             save_chat_state(state);
         }
@@ -3229,8 +3774,8 @@ function register_event_listeners() {
     // Message received: scoring pipeline + swipe re-score
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (id) => {
         // Check if this is a swipe re-score (previously scored message was swiped)
-        if (PENDING_SWIPE_RESCORE !== null && PENDING_SWIPE_RESCORE === id) {
-            PENDING_SWIPE_RESCORE = null;
+        if (PENDING_SWIPE_RESCORES.has(id)) {
+            PENDING_SWIPE_RESCORES.delete(id);
             log(`Swipe re-score triggered for message #${id}`);
             setTimeout(() => score_and_process_message(id, { force: true }), 500);
             return;
@@ -3264,15 +3809,15 @@ function register_event_listeners() {
             }
 
             // Recompute drift state
-            if (CURRENT_TRAITS.length > 0) {
-                CURRENT_DRIFT_STATE = update_drift_state(CURRENT_TRAITS, state.score_history);
+            if (CURRENT_DIMENSIONS.length > 0) {
+                CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history);
                 state.drift_state = CURRENT_DRIFT_STATE;
             }
             save_chat_state(state);
             update_dashboard();
 
             // Flag this message for re-scoring when the new swipe renders
-            PENDING_SWIPE_RESCORE = message_id;
+            PENDING_SWIPE_RESCORES.add(message_id);
             log(`Flagged message #${message_id} for swipe re-score`);
         }
     });
@@ -3315,8 +3860,8 @@ jQuery(async function () {
     // Restore state for current chat
     try {
         const state = get_chat_state();
-        if (state.traits?.length > 0) {
-            CURRENT_TRAITS = state.traits;
+        if (state.dimensions?.length > 0) {
+            CURRENT_DIMENSIONS = state.dimensions;
             CURRENT_DRIFT_STATE = state.drift_state || {};
             update_dashboard();
             update_report_display();
