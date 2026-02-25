@@ -29,7 +29,7 @@ export { MODULE_NAME };
 
 const MODULE_NAME = 'driftguard';
 const MODULE_NAME_FANCY = 'DriftGuard';
-const MODULE_VERSION = '0.4.0';
+const MODULE_VERSION = '0.5.0';
 const LOG_PREFIX = `[${MODULE_NAME_FANCY}]`;
 const MIN_SCORES_FOR_CORRECTION = 2;
 const MIN_SCORES_FOR_VERDICT = 2;
@@ -289,8 +289,9 @@ SCORES (use actual dimension IDs as keys, e.g. "warmth", "stability", etc.):
 
 const CORRECTION_GENERATION_PROMPT = `You are writing a brief Author's Note to steer {{character_name}} back toward their intended personality. The note will be injected into the conversation context.
 
+{{intensity_block}}
+
 RULES:
-- Write 2-4 sentences of BEHAVIORAL cues, not meta-instructions
 - Show how the character acts, not what they should be
 - Use present tense, narrative style ("she deflects", "he avoids eye contact")
 - Reference specific mannerisms, speech patterns, physical responses
@@ -315,7 +316,7 @@ DRIFT EVIDENCE:
 
 {{escalation_block}}
 
-Write EXACTLY 2-4 sentences of behavioral cues. No preamble, no explanation, no meta-commentary. Plain text only — no markdown, no asterisks, no quotes.`;
+Write behavioral cues matching the intensity guidance above. No preamble, no explanation, no meta-commentary. Plain text only — no markdown, no asterisks, no quotes.`;
 
 const BASELINE_GENERATION_PROMPT = `You are writing a brief, persistent Author's Note to anchor {{character_name}}'s core personality. This note will be present throughout the conversation to prevent gradual personality drift.
 
@@ -413,7 +414,7 @@ function create_empty_chat_state() {
         dimensions: [],                    // Active dimensions with targets and contexts
         calibration_hash: null,            // Hash of character description used for calibration
         score_history: [],                 // Array of { message_id, scores: { dim_id: 0.0-1.0 } }
-        drift_state: {},                   // Per-dimension: { moving_avg, deviation, trend, correcting, severe, cusum_value }
+        drift_state: {},                   // Per-dimension: { moving_avg, deviation, trend, correcting, severe, cusum_value, uncertainty }
         active_correction: { enabled: false },
         ceiling_dimensions: [],            // Dimension IDs that hit correction ceiling
         ceiling_model: null,
@@ -423,6 +424,7 @@ function create_empty_chat_state() {
         corrections_injected: 0,
         ever_corrected_dimensions: [],     // Dimension IDs that were ever corrected
         ever_cusum_triggered: [],          // Dimension IDs where CUSUM ever triggered drift
+        cusum_reset_after: {},             // Per-dimension: message_id after which CUSUM restarts (prevents false re-triggers)
         last_scored_message_id: null,
         baseline_text: null,
         report: null,
@@ -494,6 +496,47 @@ function ema(arr, window_size) {
     return result;
 }
 
+/**
+ * Scalar Kalman filter for score estimation.
+ * Returns { estimate, uncertainty } — a smoothed current-value estimate
+ * and a confidence interval width (±uncertainty for ~95% CI).
+ *
+ * @param {number[]} scores - Array of observed scores (0.0-1.0)
+ * @param {number} R - Observation noise variance (~0.04 = 0.2 std dev, matching 0.25 rubric step)
+ * @param {number} Q - Process noise variance (~0.005 = 0.07 std dev per step, gradual drift)
+ * @returns {{ estimate: number, uncertainty: number }}
+ */
+function kalman_filter(scores, R = 0.04, Q = 0.005) {
+    if (!scores || scores.length === 0) return { estimate: 0, uncertainty: 1 };
+    if (scores.length === 1) return { estimate: scores[0], uncertainty: Math.sqrt(R) * 1.96 };
+
+    // Initialize state from first observation
+    let x = scores[0];       // State estimate
+    let P = R;               // Estimate covariance (start uncertain)
+
+    for (let i = 1; i < scores.length; i++) {
+        // Predict
+        // x_pred = x (no control input)
+        const P_pred = P + Q;
+
+        // Update
+        const K = P_pred / (P_pred + R);  // Kalman gain
+        x = x + K * (scores[i] - x);
+        P = (1 - K) * P_pred;
+    }
+
+    // Guard against non-finite results
+    if (!Number.isFinite(x) || !Number.isFinite(P)) {
+        warn(`Kalman filter produced non-finite result (x=${x}, P=${P}) from ${scores.length} scores. Falling back to mean.`);
+        return { estimate: mean(scores), uncertainty: 0.5 };
+    }
+
+    return {
+        estimate: x,
+        uncertainty: Math.sqrt(P) * 1.96,  // 95% CI half-width
+    };
+}
+
 /** Valid discrete score levels for 5-point rubric scale. */
 const DISCRETE_SCALE = [0.0, 0.25, 0.5, 0.75, 1.0];
 
@@ -563,6 +606,29 @@ function sanitize_for_prompt(text) {
  */
 function slugify(label) {
     return label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+
+/**
+ * Fisher-Yates shuffle — returns a new shuffled copy (does not mutate input).
+ */
+function shuffle_array(arr) {
+    const shuffled = [...arr];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+}
+
+/**
+ * Split an array into chunks of at most `size` elements.
+ */
+function chunk_array(arr, size) {
+    const chunks = [];
+    for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+    }
+    return chunks;
 }
 
 /**
@@ -1160,15 +1226,6 @@ async function score_response(response_text, dimensions, char_description, messa
     }
 
     const char_name = get_character_name();
-
-    // Build dimension descriptions with rubric anchors for the scoring prompt
-    const dimensions_with_rubrics = dimensions.map(d => {
-        const ctx = d.context ? `\n  Character context: ${d.context}` : '';
-        const rubric_text = Object.entries(d.rubric)
-            .map(([level, desc]) => `    ${level}: ${desc}`)
-            .join('\n');
-        return `- ${d.id}: ${d.low_label} (0.0) <-> ${d.high_label} (1.0)\n  ${d.scoring_guidance}${ctx}\n  Rubric:\n${rubric_text}`;
-    }).join('\n\n');
     const char_desc_text = char_description || '';
 
     // Build recent conversation context (last 6 messages before the scored response)
@@ -1189,58 +1246,86 @@ async function score_response(response_text, dimensions, char_description, messa
         }).join('\n')
         : '(No prior messages available)';
 
-    const prompt = SCORING_PROMPT
-        .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(char_name))
-        .replace('{{character_description}}', sanitize_for_prompt(char_desc_text))
-        .replace('{{recent_context}}', recent_context)
-        .replace('{{dimensions_with_rubrics}}', dimensions_with_rubrics)
-        .replace('{{response_text}}', scoring_text);
+    // Split dimensions into shuffled chunks of 4 for scoring isolation.
+    // Scoring each chunk independently eliminates halo effects (one dimension's
+    // score influencing adjacent dimensions) and positional bias.
+    const CHUNK_SIZE = 4;
+    const shuffled_dims = shuffle_array(dimensions);
+    const chunks = chunk_array(shuffled_dims, CHUNK_SIZE);
+    log(`Scoring ${dimensions.length} dimensions in ${chunks.length} chunk(s)`);
 
-    const messages = [
-        { role: 'system', content: `You are a character analyst. Score only ${char_name}'s behavior on dimensional rubrics. Provide reasoning then JSON scores.` },
-        { role: 'user', content: prompt },
-    ];
-
-    // expect_json=false to allow CoT reasoning before JSON output
-    const raw_text = await analyze(messages, 600, false);
-
-    // Extract JSON scores from the CoT + JSON response
-    const raw_scores = extract_json(raw_text);
-
-    if (!raw_scores || typeof raw_scores !== 'object') {
-        error('Scoring did not return a valid object:', typeof raw_text === 'string' ? raw_text.substring(0, 200) : raw_text);
-        return {};
-    }
-
-    // Store CoT reasoning for debugging (extract text before the JSON block)
-    let reasoning = null;
-    if (typeof raw_text === 'string') {
-        const json_start = raw_text.indexOf('{');
-        if (json_start > 0) {
-            reasoning = raw_text.substring(0, json_start).trim();
-        }
-    }
-
-    // Extract scores by dimension ID and snap to discrete scale
     const id_scores = {};
     const na_dims = new Set();
+    const all_reasoning = [];
 
-    for (const dim of dimensions) {
-        const score = raw_scores[dim.id];
+    // Score each chunk sequentially to avoid rate limiting
+    for (let ci = 0; ci < chunks.length; ci++) {
+        const chunk = chunks[ci];
 
-        // Handle null (N/A) — dimension not observable in this scene
-        if (score === null) {
-            na_dims.add(dim.id);
-            continue;
-        }
+        // Build dimension descriptions with rubric anchors for this chunk
+        const dimensions_with_rubrics = chunk.map(d => {
+            const ctx = d.context ? `\n  Character context: ${d.context}` : '';
+            const rubric_text = Object.entries(d.rubric)
+                .map(([level, desc]) => `    ${level}: ${desc}`)
+                .join('\n');
+            return `- ${d.id}: ${d.low_label} (0.0) <-> ${d.high_label} (1.0)\n  ${d.scoring_guidance}${ctx}\n  Rubric:\n${rubric_text}`;
+        }).join('\n\n');
 
-        if (score !== undefined) {
-            const parsed = parseFloat(score);
-            if (Number.isNaN(parsed)) {
-                warn(`Non-numeric score for "${dim.id}": ${JSON.stringify(score)} -- skipping`);
+        const prompt = SCORING_PROMPT
+            .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(char_name))
+            .replace('{{character_description}}', sanitize_for_prompt(char_desc_text))
+            .replace('{{recent_context}}', recent_context)
+            .replace('{{dimensions_with_rubrics}}', dimensions_with_rubrics)
+            .replace('{{response_text}}', scoring_text);
+
+        const messages = [
+            { role: 'system', content: `You are a character analyst. Score only ${char_name}'s behavior on dimensional rubrics. Provide reasoning then JSON scores.` },
+            { role: 'user', content: prompt },
+        ];
+
+        try {
+            // expect_json=false to allow CoT reasoning before JSON output
+            const raw_text = await analyze(messages, 600, false);
+
+            // Extract JSON scores from the CoT + JSON response
+            const raw_scores = extract_json(raw_text);
+
+            if (!raw_scores || typeof raw_scores !== 'object') {
+                warn(`Chunk ${ci + 1}/${chunks.length} did not return a valid object — skipping chunk`);
                 continue;
             }
-            id_scores[dim.id] = snap_to_discrete(Math.max(0, Math.min(1, parsed)));
+
+            // Collect CoT reasoning for debugging
+            if (typeof raw_text === 'string') {
+                const json_start = raw_text.indexOf('{');
+                if (json_start > 0) {
+                    all_reasoning.push(raw_text.substring(0, json_start).trim());
+                }
+            }
+
+            // Extract scores by dimension ID and snap to discrete scale
+            for (const dim of chunk) {
+                const score = raw_scores[dim.id];
+
+                // Handle null (N/A) — dimension not observable in this scene
+                if (score === null) {
+                    na_dims.add(dim.id);
+                    continue;
+                }
+
+                if (score !== undefined) {
+                    const parsed = parseFloat(score);
+                    if (Number.isNaN(parsed)) {
+                        warn(`Non-numeric score for "${dim.id}": ${JSON.stringify(score)} -- skipping`);
+                        continue;
+                    }
+                    id_scores[dim.id] = snap_to_discrete(Math.max(0, Math.min(1, parsed)));
+                }
+            }
+
+            log(`Chunk ${ci + 1}/${chunks.length}: scored ${chunk.filter(d => id_scores[d.id] !== undefined).map(d => d.id).join(', ') || '(none)'}`);
+        } catch (err) {
+            warn(`Chunk ${ci + 1}/${chunks.length} scoring failed: ${err.message} — skipping chunk`);
         }
     }
 
@@ -1250,8 +1335,8 @@ async function score_response(response_text, dimensions, char_description, messa
     }
     log(`${na_dims.size} dimensions N/A, ${Object.keys(id_scores).length} dimensions scored`);
 
-    // Attach reasoning to the return value for storage
-    id_scores._reasoning = reasoning;
+    // Attach combined reasoning to the return value for storage
+    id_scores._reasoning = all_reasoning.length > 0 ? all_reasoning.join('\n---\n') : null;
 
     return id_scores;
 }
@@ -1300,7 +1385,7 @@ function store_scores(message, message_index, scores) {
  * Compute drift state for each dimension using distance-from-target.
  * Drift is bidirectional: a character can drift in either direction on any dimension.
  */
-function update_drift_state(dimensions, score_history) {
+function update_drift_state(dimensions, score_history, cusum_reset_after = {}) {
     const drift_window = get_settings('drift_window');
     const threshold = get_settings('drift_threshold');        // Max allowed deviation from target
     const alert_threshold = get_settings('drift_alert_threshold');  // Severe deviation
@@ -1314,35 +1399,48 @@ function update_drift_state(dimensions, score_history) {
     //   allowance=0.10, decision=0.64 → requires ~4-5 scores deviating by 0.25 to trigger.
     // Severe uses a lower window multiplier (0.5) to trigger faster for high deviations.
     const allowance = Math.max(threshold * 0.5, 0.125);
-    const decision_threshold = allowance * drift_window * 0.8;
+    const base_decision_threshold = allowance * drift_window * 0.8;
     const severe_allowance = Math.max(alert_threshold * 0.5, 0.125);
-    const severe_decision = severe_allowance * drift_window * 0.5;
+    const base_severe_decision = severe_allowance * drift_window * 0.5;
+
+    // Bonferroni correction (Šidák-like sqrt(n) scaling for correlated dimensions).
+    // With 11 dimensions: factor ≈ 3.32, requiring ~8-10 above-allowance deviations instead of ~4-5.
+    const bonferroni_factor = dimensions.length > 1 ? Math.sqrt(dimensions.length) : 1;
+    const decision_threshold = base_decision_threshold * bonferroni_factor;
+    const severe_decision = base_severe_decision * bonferroni_factor;
 
     for (const dim of dimensions) {
-        // EMA window: last drift_window scores (for UI display)
+        // Kalman window: last drift_window scores (for smoothed estimate + uncertainty)
         const recent_scores = score_history
             .slice(-drift_window)
             .map(entry => entry.scores[dim.id])
             .filter(s => s !== undefined);
 
-        // CUSUM window: broader context (last drift_window * 2 scores)
-        const cusum_scores = score_history
-            .slice(-(drift_window * 2))
+        // CUSUM window: broader context (last drift_window * 2 scores).
+        // If a CUSUM reset marker exists for this dimension, filter to only scores after the reset point.
+        const reset_after_id = cusum_reset_after[dim.id];
+        let cusum_history = score_history.slice(-(drift_window * 2));
+        if (reset_after_id !== undefined && reset_after_id !== null) {
+            cusum_history = cusum_history.filter(entry => entry.message_id > reset_after_id);
+        }
+        const cusum_scores = cusum_history
             .map(entry => entry.scores[dim.id])
             .filter(s => s !== undefined);
 
         if (recent_scores.length === 0) {
-            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'no_data', correcting: false, severe: false, cusum_value: 0 };
+            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'no_data', correcting: false, severe: false, cusum_value: 0, uncertainty: 1 };
             continue;
         }
 
-        // EMA for UI display
-        const moving_avg = ema(recent_scores, drift_window);
+        // Kalman filter for smoothed estimate and uncertainty
+        const kalman = kalman_filter(recent_scores);
+        const moving_avg = kalman.estimate;
+        const uncertainty = kalman.uncertainty;
 
         // Guard against NaN/Infinity propagation from corrupt scores
         if (!Number.isFinite(moving_avg)) {
             warn(`Non-finite moving average for ${dim.id}: ${moving_avg} from ${recent_scores.length} scores`);
-            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'error', correcting: false, severe: false, cusum_value: 0 };
+            drift_state[dim.id] = { moving_avg: null, deviation: null, trend: 'error', correcting: false, severe: false, cusum_value: 0, uncertainty: 1 };
             continue;
         }
 
@@ -1356,6 +1454,7 @@ function update_drift_state(dimensions, score_history) {
                 correcting: false,
                 severe: false,
                 cusum_value: 0,
+                uncertainty,
             };
             continue;
         }
@@ -1369,7 +1468,7 @@ function update_drift_state(dimensions, score_history) {
             : second_half_dev < first_half_dev - 0.03 ? 'correcting'
             : 'stable';
 
-        // CUSUM for drift trigger decisions
+        // CUSUM for drift trigger decisions (uses Bonferroni-adjusted thresholds)
         const cusum_result = cusum(cusum_scores, dim.target, allowance, decision_threshold);
         const severe_result = cusum(cusum_scores, dim.target, severe_allowance, severe_decision);
 
@@ -1380,6 +1479,7 @@ function update_drift_state(dimensions, score_history) {
             correcting: cusum_result.triggered,
             severe: severe_result.triggered,
             cusum_value: cusum_result.cusum,
+            uncertainty,
         };
     }
 
@@ -1412,9 +1512,45 @@ function compute_post_correction_averages(dim_ids, score_history, since_message)
  */
 async function generate_correction(drifting_dims, all_dimensions, char_description, chat, scoring_evidence, escalation_context) {
     const max = get_settings('correction_max_dimensions');
+    const threshold = get_settings('drift_threshold');
     const worst = [...drifting_dims]
         .sort((a, b) => b.deviation - a.deviation)  // Sort by worst deviation
         .slice(0, max);
+
+    // Compute graded correction intensity from deviation ratio.
+    // Uses the worst dimension's deviation relative to the threshold.
+    const worst_deviation = worst.length > 0 ? Math.max(...worst.map(d => d.deviation || 0)) : 0;
+    const deviation_ratio = threshold > 0 ? worst_deviation / threshold : 1;
+
+    let intensity;
+    if (deviation_ratio < 1.3) {
+        intensity = 'SUBTLE';
+    } else if (deviation_ratio < 1.8) {
+        intensity = 'MODERATE';
+    } else {
+        intensity = 'STRONG';
+    }
+
+    // Escalation context forces at least MODERATE intensity
+    if (escalation_context && intensity === 'SUBTLE') {
+        intensity = 'MODERATE';
+    }
+
+    // Trend-aware downgrade: if most drifting dims show 'correcting' trend, reduce intensity one level
+    const correcting_count = worst.filter(d => d.trend === 'correcting').length;
+    if (correcting_count > worst.length / 2 && !escalation_context) {
+        if (intensity === 'STRONG') intensity = 'MODERATE';
+        else if (intensity === 'MODERATE') intensity = 'SUBTLE';
+    }
+
+    log(`Correction intensity: ${intensity} (deviation ratio: ${deviation_ratio.toFixed(2)}, correcting: ${correcting_count}/${worst.length})`);
+
+    const intensity_instructions = {
+        'SUBTLE': 'INTENSITY: SUBTLE — Write 1-2 sentences. Use gentle, indirect behavioral cues. Light touch only.',
+        'MODERATE': 'INTENSITY: MODERATE — Write 2-3 sentences. Use clear behavioral cues with specific mannerisms and speech patterns.',
+        'STRONG': 'INTENSITY: STRONG — Write 3-4 sentences. Use vivid, concrete behavioral cues with physical responses, speech patterns, and emotional grounding.',
+    };
+    const intensity_block = intensity_instructions[intensity];
 
     // Describe drifting dimensions with direction
     const drifting_descriptions = worst.map(dd => {
@@ -1475,6 +1611,7 @@ Generate a DIFFERENT correction with stronger behavioral anchoring. Use more spe
 
     const prompt = CORRECTION_GENERATION_PROMPT
         .replace(/\{\{character_name\}\}/g, sanitize_for_prompt(char_name))
+        .replace('{{intensity_block}}', intensity_block)
         .replace('{{description}}', sanitize_for_prompt(char_description || ''))
         .replace('{{all_dimensions}}', all_dims_text)
         .replace('{{drifting_dimensions}}', drifting_descriptions)
@@ -1717,7 +1854,7 @@ async function score_and_process_message(message_index, { force = false } = {}) 
             }
         }
 
-        const drift = update_drift_state(state.dimensions, state.score_history);
+        const drift = update_drift_state(state.dimensions, state.score_history, state.cusum_reset_after || {});
         save_drift_state(drift);
         update_dashboard();
         update_message_badges();
@@ -1802,7 +1939,12 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                         .filter(d => d.deviation === null || d.deviation > recovery_threshold);
 
                     if (corrected_still_drifting.length === 0) {
-                        // All corrected dimensions recovered
+                        // All corrected dimensions recovered — set CUSUM reset markers
+                        if (!state.cusum_reset_after) state.cusum_reset_after = {};
+                        for (const dim_id of correction.dim_ids) {
+                            state.cusum_reset_after[dim_id] = state.last_scored_message_id;
+                            log(`CUSUM reset marker set for ${dim_id} at message #${state.last_scored_message_id}`);
+                        }
                         clear_correction();
                         const still_drifting = drifting.filter(d => !correction.dim_ids.includes(d.dim_id));
                         if (still_drifting.length > 0) {
@@ -1827,7 +1969,21 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                         const worsened = current_worst_dev > correction.deviation_at_correction + 0.05;
                         const improved = current_worst_dev < correction.deviation_at_correction - 0.02;
 
-                        if (worsened && correction.attempt < max_attempts) {
+                        // Derivative damping: check trends of corrected dimensions before escalating.
+                        // If all corrected dims are recovering (trend = 'correcting'), the correction is
+                        // working but slowly — reset patience instead of escalating.
+                        const corrected_trends = correction.dim_ids
+                            .map(dim_id => drift[dim_id]?.trend)
+                            .filter(t => t !== undefined);
+                        const all_recovering = corrected_trends.length > 0 && corrected_trends.every(t => t === 'correcting');
+                        const any_worsening = corrected_trends.some(t => t === 'drifting');
+
+                        if (all_recovering) {
+                            // Correction is working, just slowly — give more time
+                            log('Derivative damping: all corrected dimensions recovering — resetting patience instead of escalating');
+                            correction.scores_since_correction = 0;
+                            correction.deviation_at_correction = current_worst_dev;
+                        } else if (worsened && correction.attempt < max_attempts) {
                             // Escalate: target the originally-corrected dimensions that are still drifting,
                             // not whatever CUSUM currently flags (which may be a different set)
                             const escalation_targets = corrected_still_drifting.map(d => {
@@ -1852,8 +2008,13 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                         } else if (improved) {
                             correction.scores_since_correction = 0;
                             correction.deviation_at_correction = current_worst_dev;
+                        } else if (!any_worsening) {
+                            // Stagnant but not worsening — give more time (derivative damping)
+                            log('Derivative damping: stagnant but no dimensions worsening — resetting patience');
+                            correction.scores_since_correction = 0;
+                            correction.deviation_at_correction = current_worst_dev;
                         } else if (correction.attempt < max_attempts) {
-                            // Stagnant: target the originally-corrected dimensions that are still drifting
+                            // Stagnant and worsening: escalate
                             const escalation_targets = corrected_still_drifting.map(d => {
                                 const full = drifting.find(dd => dd.dim_id === d.dim_id);
                                 return full || d;
@@ -1929,6 +2090,12 @@ async function score_and_process_message(message_index, { force = false } = {}) 
                 state.recovery_cycles = (state.recovery_cycles || 0) + 1;
                 const needed = get_settings('recovery_patience');
                 if (state.recovery_cycles >= needed) {
+                    // Set CUSUM reset markers for recovered dimensions
+                    if (!state.cusum_reset_after) state.cusum_reset_after = {};
+                    for (const dim_id of corrected_dim_ids) {
+                        state.cusum_reset_after[dim_id] = state.last_scored_message_id;
+                        log(`CUSUM reset marker set for ${dim_id} at message #${state.last_scored_message_id}`);
+                    }
                     clear_correction();
                     state.active_correction = { enabled: false };
                     state.cooldown_remaining = get_settings('correction_cooldown');
@@ -3150,7 +3317,7 @@ async function score_chat_retroactively() {
         }
 
         // Recompute drift state after all scoring
-        const drift = update_drift_state(state.dimensions, state.score_history);
+        const drift = update_drift_state(state.dimensions, state.score_history, state.cusum_reset_after || {});
         save_drift_state(drift);
         save_chat_state(state);
         update_dashboard();
@@ -3298,7 +3465,7 @@ function initialize_ui_listeners() {
 
                 const state = get_chat_state();
                 if (state.dimensions?.length > 0 && state.score_history?.length > 0) {
-                    const drift = update_drift_state(state.dimensions, state.score_history);
+                    const drift = update_drift_state(state.dimensions, state.score_history, state.cusum_reset_after || {});
                     save_drift_state(drift);
                     update_trait_bars();
                 }
@@ -3638,6 +3805,7 @@ function register_event_listeners() {
             state.ceiling_dimensions = [];
             state.ever_corrected_dimensions = [];
             state.ever_cusum_triggered = [];
+            state.cusum_reset_after = {};
             state.messages_scored = 0;
             state.last_scored_message_id = null;
             state.recovery_cycles = 0;
@@ -3751,7 +3919,7 @@ function register_event_listeners() {
 
         // Rebuild drift state from score history if needed
         if (CURRENT_DIMENSIONS.length > 0 && state.score_history?.length > 0 && Object.keys(CURRENT_DRIFT_STATE).length === 0) {
-            CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history);
+            CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history, state.cusum_reset_after || {});
             state.drift_state = CURRENT_DRIFT_STATE;
             save_chat_state(state);
         }
@@ -3810,7 +3978,7 @@ function register_event_listeners() {
 
             // Recompute drift state
             if (CURRENT_DIMENSIONS.length > 0) {
-                CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history);
+                CURRENT_DRIFT_STATE = update_drift_state(CURRENT_DIMENSIONS, state.score_history, state.cusum_reset_after || {});
                 state.drift_state = CURRENT_DRIFT_STATE;
             }
             save_chat_state(state);
