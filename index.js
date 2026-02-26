@@ -1104,7 +1104,12 @@ async function calibrate_dimensions(character_description) {
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 1000);
+    let result = await analyze(messages, 1000);
+
+    // Some models wrap the response in an array — unwrap single-element arrays
+    if (Array.isArray(result) && result.length === 1 && typeof result[0] === 'object') {
+        result = result[0];
+    }
 
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
         error('Calibration did not return a valid object:', result);
