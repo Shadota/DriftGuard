@@ -1786,6 +1786,11 @@ globalThis.driftguard_intercept_generate = async function (chat, contextSize, ab
  * @param {boolean} options.force - If true, bypass should_score_message() check
  */
 async function score_and_process_message(message_index, { force = false } = {}) {
+    if (CALIBRATION_IN_PROGRESS && !force) {
+        log('Calibration in progress, deferring scoring');
+        return;
+    }
+
     const state = get_chat_state();
     if (!state.dimensions || state.dimensions.length === 0) {
         if (force) toastr.warning('No dimensions calibrated yet.', MODULE_NAME_FANCY);
@@ -2185,6 +2190,10 @@ async function score_and_process_message(message_index, { force = false } = {}) 
 
 async function on_message_received(message_index) {
     if (!get_settings('enabled')) return;
+    if (CALIBRATION_IN_PROGRESS) {
+        log('Calibration in progress, skipping auto-score');
+        return;
+    }
     if (SCORING_IN_PROGRESS) {
         if (!SCORING_QUEUE.includes(message_index)) {
             SCORING_QUEUE.push(message_index);
@@ -3630,6 +3639,7 @@ function initialize_ui_listeners() {
     $(document).on('click', '#dc_btn_reextract', async function () {
         const btn = $(this);
         btn.addClass('dc_disabled');
+        CALIBRATION_IN_PROGRESS = true;
 
         try {
             const context = getContext();
@@ -3673,6 +3683,7 @@ function initialize_ui_listeners() {
         } catch (err) {
             toastr.error(`Dimension calibration failed: ${err.message}`, MODULE_NAME_FANCY);
         } finally {
+            CALIBRATION_IN_PROGRESS = false;
             btn.removeClass('dc_disabled');
         }
     });
