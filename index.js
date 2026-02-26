@@ -836,18 +836,12 @@ async function call_openai_analysis(messages, max_tokens = 500, expect_json = tr
             await new Promise(r => setTimeout(r, delay));
         }
 
-        const controller = new AbortController();
-        const timeout_id = setTimeout(() => controller.abort(), 30000);
-
         try {
             const response = await fetch(url, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(payload),
-                signal: controller.signal,
             });
-
-            clearTimeout(timeout_id);
 
             if (response.status === 400 && expect_json) {
                 // Many local servers don't support response_format -- retry without it
@@ -869,10 +863,6 @@ async function call_openai_analysis(messages, max_tokens = 500, expect_json = tr
             const data = await response.json();
             return data.choices?.[0]?.message?.content || '';
         } catch (err) {
-            clearTimeout(timeout_id);
-            if (err.name === 'AbortError') {
-                throw new Error('Analysis API request timed out after 30s');
-            }
             last_error = err;
             if (attempt >= max_retries) throw err;
         }
