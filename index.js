@@ -804,7 +804,7 @@ function extract_json(raw_text) {
  * Call an OpenAI-compatible analysis endpoint.
  * Follows Context-Truncator's call_summary_endpoint() pattern.
  */
-async function call_openai_analysis(messages, max_tokens = 500, expect_json = true) {
+async function call_openai_analysis(messages, expect_json = true) {
     const endpoint = get_settings('openai_endpoint');
     const api_key = get_settings('openai_api_key');
     const model = get_settings('openai_model');
@@ -817,7 +817,6 @@ async function call_openai_analysis(messages, max_tokens = 500, expect_json = tr
 
     const payload = {
         messages: messages,
-        max_tokens: max_tokens,
         temperature: 0.1,
         stream: false,
     };
@@ -934,14 +933,14 @@ async function call_claude_code_analysis(messages, max_tokens = 500) {
 /**
  * Unified analysis interface. Routes to the configured backend.
  */
-async function analyze(messages, max_tokens = 500, expect_json = true) {
+async function analyze(messages, max_tokens = 4000, expect_json = true) {
     const backend = get_settings('analysis_backend');
 
     let raw_text;
     if (backend === 'claude_code') {
         raw_text = await call_claude_code_analysis(messages, max_tokens);
     } else {
-        raw_text = await call_openai_analysis(messages, max_tokens, expect_json);
+        raw_text = await call_openai_analysis(messages, expect_json);
     }
 
     // Strip thinking model tags (e.g. <think>...</think>) before processing
@@ -1630,7 +1629,7 @@ Generate a DIFFERENT correction with stronger behavioral anchoring. Use more spe
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 2000, false); // expect_json=false: corrections are prose
+    const result = await analyze(messages, 4000, false); // expect_json=false: corrections are prose
     return typeof result === 'string' ? result.trim() : String(result).trim();
 }
 
@@ -1709,7 +1708,7 @@ async function generate_baseline(dimensions, char_description) {
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 2000, false);
+    const result = await analyze(messages, 4000, false);
     return typeof result === 'string' ? result.trim() : String(result).trim();
 }
 
