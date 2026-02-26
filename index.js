@@ -818,7 +818,11 @@ async function call_openai_analysis(messages, expect_json = true) {
     const payload = {
         messages: messages,
         max_tokens: 4096,
-        temperature: 0.1,
+        temperature: 1.0,
+        top_p: 0.95,
+        top_k: 20,
+        min_p: 0.0,
+        presence_penalty: 1.5,
         stream: false,
     };
     if (model) payload.model = model;
