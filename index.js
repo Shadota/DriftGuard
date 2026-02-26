@@ -3474,22 +3474,19 @@ function initialize_ui_listeners() {
         }
     });
 
-    // Settings: text inputs
-    $(document).on('input', '#dc_claude_model', debounce(function () {
+    // Settings: text inputs (direct binding + 'change' event fires on blur, naturally debounced)
+    $('#dc_claude_model').on('change', function () {
         set_settings('claude_code_model', $(this).val().trim());
-    }, 500));
-
-    $(document).on('input', '#dc_openai_endpoint', debounce(function () {
+    });
+    $('#dc_openai_endpoint').on('change', function () {
         set_settings('openai_endpoint', $(this).val().trim());
-    }, 500));
-
-    $(document).on('input', '#dc_openai_api_key', debounce(function () {
+    });
+    $('#dc_openai_api_key').on('change', function () {
         set_settings('openai_api_key', $(this).val().trim());
-    }, 500));
-
-    $(document).on('input', '#dc_openai_model', debounce(function () {
+    });
+    $('#dc_openai_model').on('change', function () {
         set_settings('openai_model', $(this).val().trim());
-    }, 500));
+    });
 
     // Settings: sliders
     const slider_settings = [
