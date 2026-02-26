@@ -944,6 +944,11 @@ async function analyze(messages, max_tokens = 500, expect_json = true) {
         raw_text = await call_openai_analysis(messages, max_tokens, expect_json);
     }
 
+    // Strip thinking model tags (e.g. <think>...</think>) before processing
+    if (typeof raw_text === 'string') {
+        raw_text = raw_text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    }
+
     return expect_json ? extract_json(raw_text) : raw_text;
 }
 
@@ -1104,7 +1109,7 @@ async function calibrate_dimensions(character_description) {
         { role: 'user', content: prompt },
     ];
 
-    let result = await analyze(messages, 1000);
+    let result = await analyze(messages, 4000);
 
     // Some models wrap the response in an array — unwrap single-element arrays
     if (Array.isArray(result) && result.length === 1 && typeof result[0] === 'object') {
@@ -1285,7 +1290,7 @@ async function score_response(response_text, dimensions, char_description, messa
 
         try {
             // expect_json=false to allow CoT reasoning before JSON output
-            const raw_text = await analyze(messages, 600, false);
+            const raw_text = await analyze(messages, 4000, false);
 
             // Extract JSON scores from the CoT + JSON response
             const raw_scores = extract_json(raw_text);
@@ -1625,7 +1630,7 @@ Generate a DIFFERENT correction with stronger behavioral anchoring. Use more spe
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 300, false); // expect_json=false: corrections are prose
+    const result = await analyze(messages, 2000, false); // expect_json=false: corrections are prose
     return typeof result === 'string' ? result.trim() : String(result).trim();
 }
 
@@ -1704,7 +1709,7 @@ async function generate_baseline(dimensions, char_description) {
         { role: 'user', content: prompt },
     ];
 
-    const result = await analyze(messages, 200, false);
+    const result = await analyze(messages, 2000, false);
     return typeof result === 'string' ? result.trim() : String(result).trim();
 }
 
@@ -2422,7 +2427,7 @@ async function generate_report() {
             { role: 'user', content: prompt },
         ];
 
-        insights = await analyze(messages, 800, false);
+        insights = await analyze(messages, 4000, false);
         if (typeof insights !== 'string') insights = String(insights);
     } catch (err) {
         error('Failed to generate insights:', err);
