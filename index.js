@@ -372,6 +372,8 @@ const DEFAULT_SETTINGS = {
     openai_endpoint: '',
     openai_api_key: '',
     openai_model: '',
+    openai_max_tokens: 32768,
+    openai_disable_thinking: false,
     claude_code_model: 'sonnet',
 
     // Scoring
@@ -815,17 +817,23 @@ async function call_openai_analysis(messages, expect_json = true) {
     const headers = { 'Content-Type': 'application/json' };
     if (api_key) headers['Authorization'] = `Bearer ${api_key}`;
 
+    const max_tokens = get_settings('openai_max_tokens') || 32768;
+    const disable_thinking = get_settings('openai_disable_thinking');
+
     const payload = {
         messages: messages,
-        max_tokens: 4096,
-        temperature: 1.0,
-        top_p: 0.95,
+        max_tokens: max_tokens,
+        temperature: disable_thinking ? 0.7 : 1.0,
+        top_p: disable_thinking ? 0.8 : 0.95,
         top_k: 20,
         min_p: 0.0,
         presence_penalty: 1.5,
         stream: false,
     };
     if (model) payload.model = model;
+    if (disable_thinking) {
+        payload.chat_template_kwargs = { enable_thinking: false };
+    }
     if (expect_json) {
         payload.response_format = { type: 'json_object' };
     }
@@ -3500,6 +3508,9 @@ function initialize_ui_listeners() {
     $('#dc_openai_model').on('change', function () {
         set_settings('openai_model', $(this).val().trim());
     });
+    $(document).on('change', '#dc_openai_disable_thinking', function () {
+        set_settings('openai_disable_thinking', $(this).is(':checked'));
+    });
 
     // Settings: sliders
     const slider_settings = [
@@ -3515,6 +3526,7 @@ function initialize_ui_listeners() {
         { id: 'dc_recovery_margin', key: 'recovery_margin', display: 'dc_recovery_margin_value', format: v => parseFloat(v).toFixed(2) },
         { id: 'dc_recovery_patience', key: 'recovery_patience', display: 'dc_recovery_patience_value', format: v => v },
         { id: 'dc_baseline_depth', key: 'baseline_depth', display: 'dc_baseline_depth_value', format: v => v },
+        { id: 'dc_openai_max_tokens', key: 'openai_max_tokens', display: 'dc_openai_max_tokens_value', format: v => v },
     ];
 
     for (const slider of slider_settings) {
@@ -3818,6 +3830,7 @@ function restore_settings_to_ui() {
     $('#dc_baseline_enabled').prop('checked', get_settings('baseline_enabled'));
     $('#dc_show_per_message_badges').prop('checked', get_settings('show_per_message_badges'));
     $('#dc_show_toast_on_drift').prop('checked', get_settings('show_toast_on_drift'));
+    $('#dc_openai_disable_thinking').prop('checked', get_settings('openai_disable_thinking'));
 
     // Backend radio
     const backend = get_settings('analysis_backend');
@@ -3851,6 +3864,7 @@ function restore_settings_to_ui() {
         'dc_recovery_margin': { key: 'recovery_margin', display: 'dc_recovery_margin_value', format: v => parseFloat(v).toFixed(2) },
         'dc_recovery_patience': { key: 'recovery_patience', display: 'dc_recovery_patience_value', format: v => v },
         'dc_baseline_depth': { key: 'baseline_depth', display: 'dc_baseline_depth_value', format: v => v },
+        'dc_openai_max_tokens': { key: 'openai_max_tokens', display: 'dc_openai_max_tokens_value', format: v => v },
     };
 
     for (const [id, config] of Object.entries(sliders)) {

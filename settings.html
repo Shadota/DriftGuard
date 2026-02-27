@@ -298,6 +298,27 @@
                         </label>
                         <input type="text" id="dc_openai_model" placeholder="gpt-4o-mini" />
                     </div>
+                    <div class="dc_compact_setting">
+                        <div class="dc_setting_header">
+                            <span class="dc_setting_label">
+                                Max output tokens
+                                <span class="dc_tooltip">
+                                    <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                                    <span class="dc_tooltip_text">Maximum tokens for model output. 32768 recommended for most queries. Increase for complex tasks or thinking models.</span>
+                                </span>
+                            </span>
+                            <span id="dc_openai_max_tokens_value" class="dc_setting_value">32768</span>
+                        </div>
+                        <input type="range" id="dc_openai_max_tokens" class="dc_compact_slider" min="4096" max="81920" step="4096" value="32768" />
+                    </div>
+                    <div class="dc_compact_checkbox">
+                        <input type="checkbox" id="dc_openai_disable_thinking" />
+                        <label for="dc_openai_disable_thinking">Disable thinking mode</label>
+                        <span class="dc_tooltip">
+                            <i class="fa-solid fa-circle-info dc_info_icon"></i>
+                            <span class="dc_tooltip_text">Disables &lt;think&gt; reasoning for models that support it (e.g. Qwen3.5). Sends chat_template_kwargs with enable_thinking=false and uses instruct-mode sampling parameters.</span>
+                        </span>
+                    </div>
                 </div>
 
                 <div class="dc_button_row">
